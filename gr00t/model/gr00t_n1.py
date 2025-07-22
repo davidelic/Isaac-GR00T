@@ -28,7 +28,8 @@ from .action_head.flow_matching_action_head import (
     FlowmatchingActionHead,
     FlowmatchingActionHeadConfig,
 )
-from .backbone import EagleBackbone
+# from .backbone import EagleBackbone
+from srl_il.models.gr00t_faive.backbone import FaiveEagleBackbone
 
 BACKBONE_FEATURE_KEY = "backbone_features"
 ACTION_KEY = "action_pred"
@@ -78,7 +79,7 @@ class GR00T_N1_5(PreTrainedModel):
         super().__init__(config)
         self.local_model_path = local_model_path
 
-        self.backbone = EagleBackbone(**config.backbone_cfg)
+        self.backbone = FaiveEagleBackbone(**config.backbone_cfg)
         action_head_cfg = FlowmatchingActionHeadConfig(**config.action_head_cfg)
         self.action_head = FlowmatchingActionHead(action_head_cfg)
 
@@ -165,6 +166,7 @@ class GR00T_N1_5(PreTrainedModel):
         backbone_inputs, action_inputs = self.prepare_input(inputs)
         backbone_outputs = self.backbone(backbone_inputs)
         action_head_outputs = self.action_head(backbone_outputs, action_inputs)
+        action_head_outputs["loss"] += backbone_outputs["backbone_loss"]
         self.validate_data(action_head_outputs, backbone_outputs, is_training=True)
         return action_head_outputs
 
