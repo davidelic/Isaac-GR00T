@@ -166,7 +166,8 @@ class GR00T_N1_5(PreTrainedModel):
         backbone_inputs, action_inputs = self.prepare_input(inputs)
         backbone_outputs = self.backbone(backbone_inputs)
         action_head_outputs = self.action_head(backbone_outputs, action_inputs)
-        action_head_outputs["loss"] += backbone_outputs["backbone_loss"]
+        if backbone_outputs["backbone_loss"] is not None:
+            action_head_outputs["loss"] += backbone_outputs["backbone_loss"]
         self.validate_data(action_head_outputs, backbone_outputs, is_training=True)
         return action_head_outputs
 
