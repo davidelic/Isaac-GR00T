@@ -12,7 +12,8 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-
+import matplotlib
+matplotlib.use('Agg')  # For PNG output only
 import matplotlib.pyplot as plt
 import numpy as np
 
@@ -125,7 +126,7 @@ def calc_mse_for_single_trajectory(
             ax.legend()
             
         plt.tight_layout()
-        plt.savefig(f"trajectory_{traj_id}_actions.png")
+        plt.savefig(f"trajectory_{traj_id}_actions_orca.png")
 
         
 

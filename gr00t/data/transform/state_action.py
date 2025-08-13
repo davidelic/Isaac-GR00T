@@ -604,3 +604,206 @@ class StateActionSinCosTransform(ModalityTransform):
             cos_state = torch.cos(state)
             data[key] = torch.cat([sin_state, cos_state], dim=-1)
         return data
+
+
+class AbsoluteToRelativeAction(InvertibleModalityTransform):
+    """
+    Convert absolute actions to relative w.r.t. a reference state, and invert back.
+
+    Supports two modes:
+    - "joint": element-wise difference action - reference_state (e.g., joint positions)
+    - "pose": action is [x,y,z,qx,qy,qz,qw], state is [x,y,z,qx,qy,qz,qw]
+
+    For pose:
+    - translation: action_xyz - ref_xyz (optionally rotated to EE frame if in_ee_frame=True)
+    - rotation: q_rel = q_ref^{-1} * q_action, then represented as axis-angle (rx,ry,rz)
+
+    The reference state is taken as the last timestep in the provided state sequence.
+    The reference for each action key is cached during apply() and used in unapply().
+    """
+
+    # Pairs of (action_key, state_key)
+    action_state_pairs: list[tuple[str, str]] = Field(..., description="Pairs of ('action.key', 'state.key') to process")
+    mode: str = Field(default="joint", description="'joint' or 'pose'")
+    in_ee_frame: bool = Field(default=False, description="When mode='pose', express translation in EE frame")
+    rotation_out: str = Field(default="quaternion", description="Output rotation format")
+    enabled: bool = Field(default=True, description="If False, no-op in apply/unapply")
+
+    _cached_refs: dict[str, torch.Tensor] = PrivateAttr(default_factory=dict)
+
+    def _compute_relative_joint(self, action: torch.Tensor, state: torch.Tensor) -> torch.Tensor:
+        # action/state: [T, D]
+        ref = state[[-1], :]  # [1, D]
+        self._current_ref = ref
+        return action - ref
+
+    @staticmethod
+    def _quat_inverse(q: torch.Tensor) -> torch.Tensor:
+        # q: [..., 4] in xyzw
+        q_conj = torch.clone(q)
+        q_conj[..., :3] = -q_conj[..., :3]
+        norm = torch.sum(q * q, dim=-1, keepdim=True)
+        return q_conj / torch.clamp(norm, min=1e-8)
+
+    @staticmethod
+    def _quat_multiply(q1: torch.Tensor, q2: torch.Tensor) -> torch.Tensor:
+        # Hamilton product, xyzw
+        x1, y1, z1, w1 = q1.unbind(dim=-1)
+        x2, y2, z2, w2 = q2.unbind(dim=-1)
+        x = w1 * x2 + x1 * w2 + y1 * z2 - z1 * y2
+        y = w1 * y2 - x1 * z2 + y1 * w2 + z1 * x2
+        z = w1 * z2 + x1 * y2 - y1 * x2 + z1 * w2
+        w = w1 * w2 - x1 * x2 - y1 * y2 - z1 * z2
+        return torch.stack([x, y, z, w], dim=-1)
+
+    @staticmethod
+    def _quat_to_axis_angle(q: torch.Tensor) -> torch.Tensor:
+        # Convert unit quaternion (xyzw) to axis-angle (rx, ry, rz)
+        q = q / torch.clamp(q.norm(dim=-1, keepdim=True), min=1e-8)
+        # angle = 2*acos(w), axis = v/|v|
+        w = torch.clamp(q[..., 3], -1.0, 1.0)
+        angle = 2.0 * torch.acos(w)
+        s = torch.sqrt(torch.clamp(1.0 - w * w, min=1e-12))
+        v = q[..., :3] / s.unsqueeze(-1)
+        # For small angles, fall back to linear
+        small = s.squeeze(-1) < 1e-6
+        v[small] = q[..., :3][small]
+        angle = angle.unsqueeze(-1)
+        return v * angle
+
+    @staticmethod
+    def _axis_angle_to_quat(r: torch.Tensor) -> torch.Tensor:
+        # r: [..., 3]
+        angle = torch.linalg.norm(r, dim=-1, keepdim=True)
+        axis = r / torch.clamp(angle, min=1e-8)
+        half = 0.5 * angle
+        sin_half = torch.sin(half)
+        x, y, z = (axis * sin_half).unbind(dim=-1)
+        w = torch.cos(half).squeeze(-1)
+        return torch.stack([x, y, z, w], dim=-1)
+
+    @staticmethod
+    def _rotate_vec_by_quat(v: torch.Tensor, q: torch.Tensor) -> torch.Tensor:
+        # v: [..., 3], q: [..., 4] xyzw
+        # Convert v to pure quaternion
+        zeros = torch.zeros_like(v[..., :1])
+        v_quat = torch.cat([v, zeros], dim=-1)
+        q_inv = AbsoluteToRelativeAction._quat_inverse(q)
+        rotated = AbsoluteToRelativeAction._quat_multiply(
+            AbsoluteToRelativeAction._quat_multiply(q, v_quat), q_inv
+        )
+        return rotated[..., :3]
+
+    def _compute_relative_pose(self, action: torch.Tensor, state: torch.Tensor) -> torch.Tensor:
+        # action/state: [T, 7] -> [T, 6] (xyz + axis-angle)
+        assert action.shape[-1] == 7 and state.shape[-1] == 7, f"Expected pose dims 7, got {action.shape[-1]}, {state.shape[-1]}"
+        ref = state[[-1], :]  # [1, 7]
+        self._cached_ref_pose = ref
+        t_rel = action[..., :3] - ref[..., :3]
+        if self.in_ee_frame:
+            ref_q = ref[..., 3:7].expand_as(action[..., 3:7])
+            t_rel = self._rotate_vec_by_quat(t_rel, self._quat_inverse(ref_q))
+        q_ref = ref[..., 3:7].expand_as(action[..., 3:7])
+        q_rel = self._quat_multiply(self._quat_inverse(q_ref), action[..., 3:7])
+        
+        if self.rotation_out == "rotation_6d":
+            # reuse the existing RotationTransform in this file
+            r6d = RotationTransform(from_rep="quaternion", to_rep="rotation_6d").forward(q_rel)
+            rel = torch.cat([t_rel, r6d], dim=-1)  # [T, 9]
+        elif self.rotation_out == "axis_angle":
+            rel = torch.cat([t_rel, self._quat_to_axis_angle(q_rel)], dim=-1)  # [T, 6]
+        else:  # quaternion
+            rel = torch.cat([t_rel, q_rel], dim=-1)  # [T, 7]
+
+        return rel
+
+    def _invert_relative_joint(self, rel: torch.Tensor, ref: torch.Tensor) -> torch.Tensor:
+        return rel + ref
+
+    def _invert_relative_pose(self, rel: torch.Tensor, ref: torch.Tensor) -> torch.Tensor:
+        # rel: [T, 6/9/7], ref: [1, 7] -> abs [T, 7]
+        t_rel = rel[..., :3]
+        
+        # Convert rotation back to quaternion based on input format
+        if self.rotation_out == "rotation_6d":
+            # rel: [T, 9] -> r6d: [T, 6]
+            r6d = rel[..., 3:9]
+            dq = RotationTransform(from_rep="rotation_6d", to_rep="quaternion").forward(r6d)
+        elif self.rotation_out == "axis_angle":
+            # rel: [T, 6] -> axis_angle: [T, 3]
+            r_rel = rel[..., 3:6]
+            dq = self._axis_angle_to_quat(r_rel)
+        else:  # quaternion
+            # rel: [T, 7] -> quat: [T, 4]
+            dq = rel[..., 3:7]
+        
+        # Handle EE frame translation
+        if self.in_ee_frame:
+            ref_q = ref[..., 3:7]
+            if ref_q.shape[0] == 1 and rel.shape[0] > 1:
+                ref_q = ref_q.expand(rel.shape[0], -1)
+            t_rel = self._rotate_vec_by_quat(t_rel, ref_q)
+        
+        # Compose absolute translation and rotation
+        ref_pos = ref[..., :3]
+        if ref_pos.shape[0] == 1 and rel.shape[0] > 1:
+            ref_pos = ref_pos.expand(rel.shape[0], -1)
+        t_abs = ref_pos + t_rel
+        
+        ref_q = ref[..., 3:7]
+        if ref_q.shape[0] == 1 and rel.shape[0] > 1:
+            ref_q = ref_q.expand(rel.shape[0], -1)
+        q_abs = self._quat_multiply(ref_q, dq)
+        
+        return torch.cat([t_abs, q_abs], dim=-1)
+
+    def apply(self, data: dict[str, Any]) -> dict[str, Any]:
+        if not self.enabled:
+            return data
+        # Reset cache per call
+        self._cached_refs.clear()
+        for action_key, state_key in self.action_state_pairs:
+            state_present = state_key in data and isinstance(data[state_key], torch.Tensor)
+            action_present = action_key in data and isinstance(data[action_key], torch.Tensor)
+
+            # Always cache the reference state if available (supports inference path where actions are absent)
+            if state_present:
+                # Store the reference state with proper shape handling
+                ref_state = data[state_key][-1:, :]  # [1, D] - ensure proper shape
+                self._cached_refs[action_key] = ref_state.clone()
+
+            if not (state_present and action_present):
+                # Nothing to convert for this pair
+                continue
+
+            action = data[action_key]
+            state = data[state_key]
+            if self.mode == "joint":
+                rel = self._compute_relative_joint(action, state)
+            elif self.mode == "pose":
+                rel = self._compute_relative_pose(action, state)
+            else:
+                raise ValueError(f"Unknown mode: {self.mode}")
+            data[action_key] = rel
+        return data
+
+    def unapply(self, data: dict[str, Any]) -> dict[str, Any]:
+        if not self.enabled:
+            return data
+        # Use cached references to reconstruct absolute actions
+        for action_key, state_key in self.action_state_pairs:
+            if action_key not in data or action_key not in self._cached_refs:
+                continue
+            rel = data[action_key]
+            ref = self._cached_refs[action_key]
+            assert isinstance(rel, torch.Tensor) and isinstance(ref, torch.Tensor)
+            if self.mode == "joint":
+                abs_action = self._invert_relative_joint(rel, ref)
+            elif self.mode == "pose":
+                abs_action = self._invert_relative_pose(rel, ref)
+            else:
+                raise ValueError(f"Unknown mode: {self.mode}")
+            data[action_key] = abs_action
+        # Clear cache after use
+        self._cached_refs.clear()
+        return data

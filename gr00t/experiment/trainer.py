@@ -74,6 +74,24 @@ class DualBrainTrainer(transformers.Trainer):
     def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None):
         outputs = model(inputs)
         loss = outputs["loss"]
+        
+        # Log individual losses to wandb if available
+        if hasattr(self, 'log') and self.state.global_step % self.args.logging_steps == 0:
+            self.log({
+                "train/backbone_loss": outputs.get("backbone_loss", 0).item() if "backbone_loss" in outputs else 0,
+                "train/action_head_loss": outputs.get("action_head_loss", 0).item() if "action_head_loss" in outputs else 0,
+                "train/weighted_backbone_loss": outputs.get("weighted_backbone_loss", 0).item() if "weighted_backbone_loss" in outputs else 0,
+                "train/weighted_action_head_loss": outputs.get("weighted_action_head_loss", 0).item() if "weighted_action_head_loss" in outputs else 0,
+                "train/total_loss": outputs.get("total_loss", 0).item() if "total_loss" in outputs else 0,
+                "train/backbone_loss_weight": model.backbone_loss_weight,
+                "train/action_head_loss_weight": model.action_head_loss_weight
+            })
+        import wandb
+        wandb.log({
+            "train/weighted_backbone_loss": outputs.get("weighted_backbone_loss", 0).item() if "weighted_backbone_loss" in outputs else 0,
+            "train/weighted_action_head_loss": outputs.get("weighted_action_head_loss", 0).item() if "weighted_action_head_loss" in outputs else 0,
+            "train/total_loss": outputs.get("total_loss", 0).item() if "total_loss" in outputs else 0,
+        })
         return (loss, outputs) if return_outputs else loss
 
     def create_optimizer(self):

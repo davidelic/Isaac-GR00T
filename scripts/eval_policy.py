@@ -52,7 +52,7 @@ class ArgsConfig:
     plot: bool = False
     """Whether to plot the images."""
 
-    modality_keys: List[str] = field(default_factory=lambda: ["right_arm", "left_arm"])
+    modality_keys: List[str] = field(default_factory=lambda: ["arm", "hand"])
     """Modality keys to evaluate."""
 
     data_config: Literal[tuple(DATA_CONFIG_MAP.keys())] = "fourier_gr1_arms_only"
@@ -67,7 +67,7 @@ class ArgsConfig:
     action_horizon: int = 16
     """Action horizon to evaluate."""
 
-    video_backend: Literal["decord", "torchvision_av"] = "decord"
+    video_backend: Literal["decord", "torchvision_av"] = "torchvision_av"
     """Video backend to use for various codec options. h264: decord or av: torchvision_av"""
 
     dataset_path: str = "demo_data/robot_sim.PickNPlace/"
@@ -100,6 +100,7 @@ def main(args: ArgsConfig):
             device="cuda" if torch.cuda.is_available() else "cpu",
         )
     else:
+        print("Using RobotInferenceClient")
         policy: BasePolicy = RobotInferenceClient(host=args.host, port=args.port)
 
     # Get the supported modalities for the policy

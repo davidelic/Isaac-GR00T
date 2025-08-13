@@ -50,6 +50,10 @@ class GR00T_N1_5_Config(PretrainedConfig):
 
     action_dim: int = field(init=False, metadata={"help": "Action dimension."})
     compute_dtype: str = field(default="float32", metadata={"help": "Compute dtype."})
+    
+    # Loss weighting configuration
+    backbone_loss_weight: float = field(default=1.0, metadata={"help": "Weight for backbone loss."})
+    action_head_loss_weight: float = field(default=1.0, metadata={"help": "Weight for action head loss."})
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
@@ -86,6 +90,10 @@ class GR00T_N1_5(PreTrainedModel):
         self.action_horizon = config.action_horizon
         self.action_dim = config.action_dim
         self.compute_dtype = config.compute_dtype
+        
+        # Loss weights
+        self.backbone_loss_weight = config.backbone_loss_weight
+        self.action_head_loss_weight = config.action_head_loss_weight
 
     def validate_inputs(self, inputs):
         # NOTE -- this should be handled internally by the model
@@ -166,8 +174,31 @@ class GR00T_N1_5(PreTrainedModel):
         backbone_inputs, action_inputs = self.prepare_input(inputs)
         backbone_outputs = self.backbone(backbone_inputs)
         action_head_outputs = self.action_head(backbone_outputs, action_inputs)
-        if backbone_outputs["backbone_loss"] is not None:
-            action_head_outputs["loss"] += backbone_outputs["backbone_loss"]
+        
+        # Get individual losses
+        backbone_loss = backbone_outputs.get("backbone_loss", None)
+        action_head_loss = action_head_outputs.get("loss", None)
+        
+        # Apply weights and combine
+        total_loss = 0.0
+        if backbone_loss is not None:
+            weighted_backbone_loss = backbone_loss * self.backbone_loss_weight
+            total_loss += weighted_backbone_loss
+            # Log backbone loss separately
+            action_head_outputs["backbone_loss"] = backbone_loss
+            action_head_outputs["weighted_backbone_loss"] = weighted_backbone_loss
+        
+        if action_head_loss is not None:
+            weighted_action_head_loss = action_head_loss * self.action_head_loss_weight
+            total_loss += weighted_action_head_loss
+            # Log action head loss separately
+            action_head_outputs["action_head_loss"] = action_head_loss
+            action_head_outputs["weighted_action_head_loss"] = weighted_action_head_loss
+        
+        # Set the total weighted loss
+        action_head_outputs["loss"] = total_loss
+        action_head_outputs["total_loss"] = total_loss
+        
         self.validate_data(action_head_outputs, backbone_outputs, is_training=True)
         return action_head_outputs
 
