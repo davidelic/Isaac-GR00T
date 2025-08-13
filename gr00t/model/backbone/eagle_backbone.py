@@ -66,7 +66,9 @@ class EagleBackbone(nn.Module):
         self.tune_llm = tune_llm
         self.tune_visual = tune_visual
         for p in self.parameters():
-            p.requires_grad = True
+            p.requires_grad = True  
+            self.eagle_model.vision_model.vision_model.head.requires_grad_(False)
+            
         if not tune_llm:
             self.eagle_model.language_model.requires_grad_(False)
         if not tune_visual:
@@ -93,6 +95,7 @@ class EagleBackbone(nn.Module):
                 self.eagle_model.language_model.eval()
             if self.eagle_model.vision_model and not self.tune_visual:
                 self.eagle_model.vision_model.eval()
+                self.eagle_model.mlp1.eval()
 
     def prepare_input(self, batch: dict) -> BatchFeature:
         return BatchFeature(data=batch)
@@ -105,6 +108,10 @@ class EagleBackbone(nn.Module):
             if k.startswith(eagle_prefix)
         }
         del eagle_input["image_sizes"]
+        if "loss_mask" in eagle_input:
+            loss_mask = eagle_input["loss_mask"]
+            del eagle_input["loss_mask"]
+
 
         eagle_output = self.eagle_model(**eagle_input, output_hidden_states=True, return_dict=True)
         eagle_features = eagle_output.hidden_states[self.select_layer]
