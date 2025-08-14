@@ -56,6 +56,9 @@ class ArgsConfig:
     api_token: str = None
     """API token for authentication. If not provided, authentication is disabled."""
 
+    train_cfg: str = None
+    """Path to the training YAML file."""
+    
 
 #####################################################################################
 
@@ -73,15 +76,21 @@ def main(args: ArgsConfig):
         # if a new data config is specified, this expect user to
         # construct your own modality config and transform
         # see gr00t/utils/data.py for more details
-        data_config = DATA_CONFIG_MAP[args.data_config]
-        modality_config = data_config.modality_config()
-        modality_transform = data_config.transform()
+        if args.train_cfg:
+            from srl_il.models.gr00t_faive.inference import build_from_yaml
+            modality_config, modality_transform = build_from_yaml(args.train_cfg)
+            embodiment_tag = args.embodiment_tag
+        else:
+            data_config = DATA_CONFIG_MAP[args.data_config]
+            modality_config = data_config.modality_config()
+            modality_transform = data_config.transform()
+            embodiment_tag = args.embodiment_tag if args.embodiment_tag else data_config.embodiment
 
         policy = Gr00tPolicy(
             model_path=args.model_path,
             modality_config=modality_config,
             modality_transform=modality_transform,
-            embodiment_tag=args.embodiment_tag,
+            embodiment_tag=embodiment_tag,
             denoising_steps=args.denoising_steps,
         )
 

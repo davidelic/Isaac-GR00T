@@ -28,6 +28,8 @@ from gr00t.model.policy import BasePolicy, Gr00tPolicy
 from gr00t.utils.eval import calc_mse_for_single_trajectory
 
 warnings.simplefilter("ignore", category=FutureWarning)
+warnings.filterwarnings("ignore", category=UserWarning, module="torchvision.io._video_deprecation_warning")
+
 
 """
 Example command:

@@ -50,7 +50,6 @@ def calc_mse_for_single_trajectory(
 
     for step_count in range(steps):
         data_point = dataset.get_step_data(traj_id, step_count)
-        print(data_point.keys())
 
         # NOTE this is to get all modality keys concatenated
         # concat_state = data_point[f"state.{modality_keys[0]}"][0]

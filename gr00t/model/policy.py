@@ -168,7 +168,9 @@ class Gr00tPolicy(BasePolicy):
         if not is_batch:
             observations = unsqueeze_dict_values(observations)
         # Apply transforms
+        print(f"observations: {observations.keys()}")
         normalized_input = self.apply_transforms(observations)
+        print(f"normalized_input: {normalized_input.keys()}")
 
         normalized_action = self._get_action_from_normalized_input(normalized_input)
         unnormalized_action = self._get_unnormalized_action(normalized_action)
