@@ -83,8 +83,6 @@ class DualBrainTrainer(transformers.Trainer):
                 "train/weighted_backbone_loss": outputs.get("weighted_backbone_loss", 0).item() if "weighted_backbone_loss" in outputs else 0,
                 "train/weighted_action_head_loss": outputs.get("weighted_action_head_loss", 0).item() if "weighted_action_head_loss" in outputs else 0,
                 "train/total_loss": outputs.get("total_loss", 0).item() if "total_loss" in outputs else 0,
-                "train/backbone_loss_weight": model.backbone_loss_weight,
-                "train/action_head_loss_weight": model.action_head_loss_weight
             })
         import wandb
         wandb.log({
