@@ -46,6 +46,7 @@ from .schema import (
     LeRobotStateActionMetadata,
 )
 from .transform import ComposedModalityTransform
+from gr00t.utils.video import CorruptVideoError
 
 LE_ROBOT_MODALITY_FILENAME = "meta/modality.json"
 LE_ROBOT_EPISODE_FILENAME = "meta/episodes.jsonl"
@@ -662,13 +663,16 @@ class LeRobotSingleDataset(Dataset):
         timestamp: np.ndarray = self.curr_traj_data["timestamp"].to_numpy()
         # Get the corresponding video timestamps from the step indices
         video_timestamp = timestamp[step_indices]
-
-        return get_frames_by_timestamps(
-            video_path.as_posix(),
-            video_timestamp,
-            video_backend=self.video_backend,
-            video_backend_kwargs=self.video_backend_kwargs,
-        )
+        try:
+            return get_frames_by_timestamps(
+                video_path.as_posix(),
+                video_timestamp,
+                video_backend=self.video_backend,
+                video_backend_kwargs=self.video_backend_kwargs,
+            )
+        except CorruptVideoError as e:
+            print(f"Corrupt video error: {e}")
+            import pdb; pdb.set_trace()
 
     def get_state_or_action(
         self,

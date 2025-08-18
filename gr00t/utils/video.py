@@ -18,7 +18,14 @@ import av
 import cv2
 import decord  # noqa: F401
 import numpy as np
+from av.error import InvalidDataError
 
+class CorruptVideoError(RuntimeError):
+    def __init__(self, msg, *, trajectory_id=None, key=None, path=None):
+        super().__init__(msg)
+        self.trajectory_id = trajectory_id
+        self.key = key
+        self.path = path
 
 def get_frames_by_indices(
     video_path: str,
@@ -96,31 +103,36 @@ def get_frames_by_timestamps(
     elif video_backend == "torchvision_av":
         # set backend
         torchvision.set_video_backend("pyav")
-        # set a video stream reader
-        reader = torchvision.io.VideoReader(video_path, "video")
-        # set the first and last requested timestamps
-        # Note: previous timestamps are usually loaded, since we need to access the previous key frame
-        first_ts = timestamps[0]
-        last_ts = timestamps[-1]
-        # access closest key frame of the first requested frame
-        # Note: closest key frame timestamp is usally smaller than `first_ts` (e.g. key frame can be the first frame of the video)
-        # for details on what `seek` is doing see: https://pyav.basswood-io.com/docs/stable/api/container.html?highlight=inputcontainer#av.container.InputContainer.seek
-        reader.seek(first_ts, keyframes_only=True)
-        # load all frames until last requested frame
-        loaded_frames = []
-        loaded_ts = []
-        for frame in reader:
-            current_ts = frame["pts"]
-            loaded_frames.append(frame["data"])
-            loaded_ts.append(current_ts)
-            if current_ts >= last_ts:
-                break
-            if len(loaded_frames) >= len(timestamps):
-                break
-        reader.container.close()
-        reader = None
-        frames = np.array(loaded_frames)
-        return frames.transpose(0, 2, 3, 1)
+        try:
+            # set a video stream reader
+            reader = torchvision.io.VideoReader(video_path, "video")
+            # set the first and last requested timestamps
+            # Note: previous timestamps are usually loaded, since we need to access the previous key frame
+            first_ts = timestamps[0]
+            last_ts = timestamps[-1]
+            # access closest key frame of the first requested frame
+            # Note: closest key frame timestamp is usally smaller than `first_ts` (e.g. key frame can be the first frame of the video)
+            # for details on what `seek` is doing see: https://pyav.basswood-io.com/docs/stable/api/container.html?highlight=inputcontainer#av.container.InputContainer.seek
+            reader.seek(first_ts, keyframes_only=True)
+            # load all frames until last requested frame
+            loaded_frames = []
+            loaded_ts = []
+            for frame in reader:
+                current_ts = frame["pts"]
+                loaded_frames.append(frame["data"])
+                loaded_ts.append(current_ts)
+                if current_ts >= last_ts:
+                    break
+                if len(loaded_frames) >= len(timestamps):
+                    break
+            reader.container.close()
+            reader = None
+            frames = np.array(loaded_frames)
+            return frames.transpose(0, 2, 3, 1)
+        except Exception as e:
+            raise CorruptVideoError(
+            f"Unexpected error reading video: {video_path}"
+            ) from e
     else:
         raise NotImplementedError
 
