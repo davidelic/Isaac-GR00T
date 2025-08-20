@@ -28,6 +28,7 @@ class RobotInferenceServer(BaseInferenceServer):
     def __init__(self, model, host: str = "*", port: int = 5555, api_token: str = None):
         super().__init__(host, port, api_token)
         self.register_endpoint("get_action", model.get_action)
+        self.register_endpoint("get_aggregated_action", model.get_aggregated_action)
         self.register_endpoint(
             "get_modality_config", model.get_modality_config, requires_input=False
         )
@@ -48,6 +49,9 @@ class RobotInferenceClient(BaseInferenceClient, BasePolicy):
 
     def get_action(self, observations: Dict[str, Any]) -> Dict[str, Any]:
         return self.call_endpoint("get_action", observations)
+    
+    def get_aggregated_action(self, observations: Dict[str, Any]) -> Dict[str, Any]:
+        return self.call_endpoint("get_aggregated_action", observations)
 
     def get_modality_config(self) -> Dict[str, ModalityConfig]:
         return self.call_endpoint("get_modality_config", requires_input=False)

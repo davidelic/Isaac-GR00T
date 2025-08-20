@@ -19,6 +19,8 @@ import numpy as np
 
 from gr00t.data.dataset import LeRobotSingleDataset
 from gr00t.model.policy import BasePolicy
+from srl_il.algo.base_algo import PolicyAggregatorTemporalAggr
+import os
 
 # numpy print precision settings 3, dont use exponential notation
 np.set_printoptions(precision=3, suppress=True)
@@ -66,18 +68,35 @@ def calc_mse_for_single_trajectory(
 
         state_joints_across_time.append(concat_state)
         gt_action_across_time.append(concat_gt_action)
+        
+        action = policy.get_aggregated_action(data_point)
+                    
+        # NOTE: concat_pred_action = action[f"action.{modality_keys[0]}"][j]
+        # the np.atleast_1d is to ensure the action is a 1D array, handle where single value is returned
+        concat_pred_action = np.concatenate(
+            [np.atleast_1d(action[f"action.{key}"][0]) for key in modality_keys],
+            axis=0,
+        )
+        pred_action_across_time.append(concat_pred_action)
 
-        if step_count % action_horizon == 0:
-            print("inferencing at step: ", step_count)
-            action_chunk = policy.get_action(data_point)
-            for j in range(action_horizon):
-                # NOTE: concat_pred_action = action[f"action.{modality_keys[0]}"][j]
-                # the np.atleast_1d is to ensure the action is a 1D array, handle where single value is returned
-                concat_pred_action = np.concatenate(
-                    [np.atleast_1d(action_chunk[f"action.{key}"][j]) for key in modality_keys],
-                    axis=0,
-                )
-                pred_action_across_time.append(concat_pred_action)
+
+        # if step_count % action_horizon == 0:
+        #     print("inferencing at step: ", step_count)
+        #     # print dimensions and shapes of data_point
+        #     print(f"data_point: {data_point.keys()}")
+        #     for key in data_point.keys():
+        #         print(f"{key}: {data_point[key].shape}")
+                                                    
+        #     action_chunk = policy.get_action(data_point)
+                        
+        #     for j in range(action_horizon):
+        #         # NOTE: concat_pred_action = action[f"action.{modality_keys[0]}"][j]
+        #         # the np.atleast_1d is to ensure the action is a 1D array, handle where single value is returned
+        #         concat_pred_action = np.concatenate(
+        #             [np.atleast_1d(action_chunk[f"action.{key}"][j]) for key in modality_keys],
+        #             axis=0,
+        #         )
+        #         pred_action_across_time.append(concat_pred_action)
 
     # plot the joints
     state_joints_across_time = np.array(state_joints_across_time)

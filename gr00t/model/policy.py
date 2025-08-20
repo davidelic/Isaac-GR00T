@@ -28,6 +28,7 @@ from gr00t.data.embodiment_tags import EmbodimentTag
 from gr00t.data.schema import DatasetMetadata
 from gr00t.data.transform.base import ComposedModalityTransform
 from gr00t.model.gr00t_n1 import GR00T_N1_5
+from srl_il.algo.base_algo import PolicyAggregatorTemporalAggr
 
 COMPUTE_DTYPE = torch.bfloat16
 
@@ -52,6 +53,13 @@ class BasePolicy(ABC):
         Return the modality config of the policy.
         """
         raise NotImplementedError
+    
+    @abstractmethod
+    def get_aggregated_action(self, observations: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Abstract method to get the aggregated action for a given state.
+        """
+        raise NotImplementedError
 
 
 class Gr00tPolicy(BasePolicy):
@@ -68,6 +76,7 @@ class Gr00tPolicy(BasePolicy):
         embodiment_tag: Union[str, EmbodimentTag],
         modality_config: Dict[str, ModalityConfig],
         modality_transform: ComposedModalityTransform,
+        policy_aggregator_cfg: Dict[str, Any],
         denoising_steps: Optional[int] = None,
         device: Union[int, str] = "cuda" if torch.cuda.is_available() else "cpu",
     ):
@@ -117,6 +126,16 @@ class Gr00tPolicy(BasePolicy):
             ):
                 self.model.action_head.num_inference_timesteps = denoising_steps
                 print(f"Set action denoising steps to {denoising_steps}")
+                
+        self.policy_aggregator = PolicyAggregatorTemporalAggr(
+            policy_aggregator_cfg["k"],
+            policy_aggregator_cfg["T_target"],
+            policy_aggregator_cfg.get("max_timesteps", 200)
+        )
+        self.policy_step_cnt = 0
+        self.policy_update_every = 1
+        
+        
 
     def apply_transforms(self, obs: Dict[str, Any]) -> Dict[str, Any]:
         """
@@ -142,7 +161,24 @@ class Gr00tPolicy(BasePolicy):
             Dict[str, Any]: The untransformed action.
         """
         return self._modality_transform.unapply(action)
-
+        
+    def get_aggregated_action(self, observations: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Get the aggregated action from the observations.
+        """
+        if self.policy_step_cnt == 0:
+            with torch.no_grad():
+                actions = self.get_action(observations)
+                # convert to tensor
+                actions = {k: torch.tensor(v).unsqueeze(0) for k, v in actions.items()}
+                self.policy_aggregator.push(actions)
+        self.policy_step_cnt = (self.policy_step_cnt + 1) % self.policy_update_every
+        action = self.policy_aggregator.step()
+        # convert to numpy
+        action = {k: v.cpu().numpy() for k, v in action.items()}
+        return action
+    
+    
     def get_action(self, observations: Dict[str, Any]) -> Dict[str, Any]:
         """
         Make a prediction with the model.
