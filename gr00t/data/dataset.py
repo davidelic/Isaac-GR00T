@@ -671,8 +671,26 @@ class LeRobotSingleDataset(Dataset):
                 video_backend_kwargs=self.video_backend_kwargs,
             )
         except CorruptVideoError as e:
-            print(f"Corrupt video error: {e}")
-            import pdb; pdb.set_trace()
+            print(f"Corrupt video error for {video_path}: {e}")
+            print(f"Returning placeholder frames for trajectory {trajectory_id}, key {key}")
+            # Return placeholder frames with the expected shape
+            # Determine expected frame dimensions from metadata if available
+            try:
+                # Try to get frame dimensions from video metadata
+                video_meta = self.lerobot_modality_meta.video.get(key.replace("video.", ""))
+                if video_meta and hasattr(video_meta, 'height') and hasattr(video_meta, 'width'):
+                    height, width = video_meta.height, video_meta.width
+                else:
+                    # Default frame dimensions if metadata not available
+                    height, width = 224, 224
+            except:
+                # Fallback to common video dimensions
+                height, width = 224, 224
+            
+            # Create placeholder frames (black frames) with expected shape
+            num_frames = len(step_indices)
+            placeholder_frames = np.zeros((num_frames, height, width, 3), dtype=np.uint8)
+            return placeholder_frames
 
     def get_state_or_action(
         self,
@@ -834,12 +852,33 @@ class CachedLeRobotSingleDataset(LeRobotSingleDataset):
                 desc=f"Caching {key} frames",
             ):
                 video_path = self.get_video_path(trajectory_id, key)
-                frames = get_all_frames(
-                    video_path.as_posix(),
-                    video_backend=self.video_backend,
-                    video_backend_kwargs=self.video_backend_kwargs,
-                    resize_size=img_resize,
-                )
+                try:
+                    frames = get_all_frames(
+                        video_path.as_posix(),
+                        video_backend=self.video_backend,
+                        video_backend_kwargs=self.video_backend_kwargs,
+                        resize_size=img_resize,
+                    )
+                except (CorruptVideoError, FileNotFoundError, Exception) as e:
+                    print(f"Error loading video {video_path}: {e}")
+                    print(f"Creating placeholder frames for trajectory {trajectory_id}, key {key}")
+                    # Create placeholder frames with the expected dimensions
+                    if img_resize is not None:
+                        height, width = img_resize[1], img_resize[0]  # resize_size is (width, height)
+                    else:
+                        # Try to get dimensions from metadata or use defaults
+                        try:
+                            video_meta = self.lerobot_modality_meta.video.get(key)
+                            if video_meta and hasattr(video_meta, 'height') and hasattr(video_meta, 'width'):
+                                height, width = video_meta.height, video_meta.width
+                            else:
+                                height, width = 480, 640
+                        except:
+                            height, width = 480, 640
+                    
+                    # Create black placeholder frames
+                    frames = np.zeros((trajectory_length, height, width, 3), dtype=np.uint8)
+                
                 assert frames.ndim == 4, f"Expected 4D array, got {frames.shape} array"
                 assert frames.shape[3] == 3, f"Expected 3 channels, got {frames.shape[3]} channels"
                 # assert (
