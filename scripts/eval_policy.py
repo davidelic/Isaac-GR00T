@@ -53,6 +53,21 @@ class ArgsConfig:
 
     plot: bool = False
     """Whether to plot the images."""
+    
+    rtc_enabled: bool = False
+    """Whether to use real-time chunking."""
+    
+    execution_horizon: int = 8
+    """Execution horizon to evaluate."""
+    
+    inference_latency_steps: int = 4
+    """Inference latency steps to evaluate."""
+    
+    plot_state: bool = False
+    """Whether to plot the state."""
+    
+    plot_path: str = "rtc_enabled" if rtc_enabled else "rtc_disabled"
+    """Path to save the plots."""
 
     modality_keys: List[str] = field(default_factory=lambda: ["arm", "hand"])
     """Modality keys to evaluate."""
@@ -149,6 +164,11 @@ def main(args: ArgsConfig):
             steps=args.steps,
             action_horizon=args.action_horizon,
             plot=args.plot,
+            rtc_enabled=args.rtc_enabled,
+            execution_horizon=args.execution_horizon,
+            inference_latency_steps=args.inference_latency_steps,
+            plot_state=args.plot_state,
+            save_plot_path=args.plot_path,
         )
         print("MSE:", mse)
         all_mse.append(mse)

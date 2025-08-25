@@ -283,6 +283,10 @@ class StateActionTransform(InvertibleModalityTransform):
             If a state key in apply_to is not present in the dictionary, it will not be normalized.
         target_rotations (dict[str, str]): The target representations for each state key.
             If a state key in apply_to is not present in the dictionary, it will not be rotated.
+        pose_keys (list[str]): Keys that contain pose data (position + rotation).
+            For these keys, first 3 dims are position, last 4 dims are quaternion rotation.
+        position_normalization_modes (dict[str, str]): Normalization modes for position part of pose keys.
+        rotation_normalization_modes (dict[str, str]): Normalization modes for rotation part of pose keys.
     """
 
     # Configurable attributes
@@ -299,10 +303,27 @@ class StateActionTransform(InvertibleModalityTransform):
     modality_metadata: dict[str, StateActionMetadata] = Field(
         default_factory=dict, description="The modality metadata for each state key."
     )
+    pose_keys: list[str] = Field(
+        default_factory=list, description="Keys that contain pose data (position + rotation)"
+    )
+    position_normalization_modes: dict[str, str] = Field(
+        default_factory=dict, description="Normalization modes for position part of pose keys"
+    )
+    rotation_normalization_modes: dict[str, str] = Field(
+        default_factory=dict, description="Normalization modes for rotation part of pose keys"
+    )
+    position_statistics: dict[str, dict] = Field(
+        default_factory=dict, description="Statistics for position part of pose keys"
+    )
+    rotation_statistics: dict[str, dict] = Field(
+        default_factory=dict, description="Statistics for rotation part of pose keys"
+    )
 
     # Model variables
     _rotation_transformers: dict[str, RotationTransform] = PrivateAttr(default_factory=dict)
     _normalizers: dict[str, Normalizer] = PrivateAttr(default_factory=dict)
+    _position_normalizers: dict[str, Normalizer] = PrivateAttr(default_factory=dict)
+    _rotation_normalizers: dict[str, Normalizer] = PrivateAttr(default_factory=dict)
     _input_dtypes: dict[str, np.dtype | torch.dtype] = PrivateAttr(default_factory=dict)
 
     # Model constants
@@ -327,7 +348,10 @@ class StateActionTransform(InvertibleModalityTransform):
 
     def model_dump(self, *args, **kwargs):
         if kwargs.get("mode", "python") == "json":
-            include = {"apply_to", "normalization_modes", "target_rotations"}
+            include = {
+                "apply_to", "normalization_modes", "target_rotations", 
+                "pose_keys", "position_normalization_modes", "rotation_normalization_modes"
+            }
         else:
             include = kwargs.pop("include", None)
 
@@ -415,20 +439,51 @@ class StateActionTransform(InvertibleModalityTransform):
                 state_key
             ].model_dump()
 
+        # Handle pose-specific statistics (split position and rotation)
+        for key in self.pose_keys:
+            split_key = key.split(".")
+            modality, state_key = split_key
+            
+            if hasattr(dataset_statistics, modality) and state_key in getattr(dataset_statistics, modality):
+                full_stats = getattr(dataset_statistics, modality)[state_key].model_dump()
+                
+                # Split statistics for position (first 3) and rotation (last 4)
+                if key in self.position_normalization_modes:
+                    self.position_statistics[key] = {}
+                    for stat_name, values in full_stats.items():
+                        if isinstance(values, list) and len(values) >= 3:
+                            self.position_statistics[key][stat_name] = values[:3]
+                
+                if key in self.rotation_normalization_modes:
+                    self.rotation_statistics[key] = {}
+                    for stat_name, values in full_stats.items():
+                        if isinstance(values, list) and len(values) >= 7:
+                            self.rotation_statistics[key][stat_name] = values[3:7]
+
         # Initialize the rotation transformers
         for key in self.target_rotations:
-            # Get the original representation of the state
-            from_rep = self.modality_metadata[key].rotation_type
-            assert from_rep is not None, f"Source rotation type not found for {key}"
+            if key in self.pose_keys:
+                # For pose keys, rotation is always quaternion input
+                from_rep = RotationType.QUATERNION
+                to_rep = RotationType(self.target_rotations[key])
+                
+                if from_rep != to_rep:
+                    self._rotation_transformers[key] = RotationTransform(
+                        from_rep=from_rep.value, to_rep=to_rep.value
+                    )
+            else:
+                # Regular rotation handling
+                from_rep = self.modality_metadata[key].rotation_type
+                assert from_rep is not None, f"Source rotation type not found for {key}"
 
-            # Get the target representation of the state, will raise an error if the target representation is not valid
-            to_rep = RotationType(self.target_rotations[key])
+                # Get the target representation of the state, will raise an error if the target representation is not valid
+                to_rep = RotationType(self.target_rotations[key])
 
-            # If the original representation is not the same as the target representation, initialize the rotation transformer
-            if from_rep != to_rep:
-                self._rotation_transformers[key] = RotationTransform(
-                    from_rep=from_rep.value, to_rep=to_rep.value
-                )
+                # If the original representation is not the same as the target representation, initialize the rotation transformer
+                if from_rep != to_rep:
+                    self._rotation_transformers[key] = RotationTransform(
+                        from_rep=from_rep.value, to_rep=to_rep.value
+                    )
 
         # Initialize the normalizers
         for key in self.normalization_modes:
@@ -470,6 +525,32 @@ class StateActionTransform(InvertibleModalityTransform):
                 mode=self.normalization_modes[key], statistics=statistics
             )
 
+        # Initialize position normalizers for pose keys
+        for key in self.position_normalization_modes:
+            if key in self.pose_keys and key in self.position_statistics:
+                self._position_normalizers[key] = Normalizer(
+                    mode=self.position_normalization_modes[key], 
+                    statistics=self.position_statistics[key]
+                )
+
+        # Initialize rotation normalizers for pose keys
+        for key in self.rotation_normalization_modes:
+            if key in self.pose_keys:
+                if key in self._rotation_transformers:
+                    # Use default statistics for target rotation type
+                    rotation_type = RotationType(self.target_rotations[key]).value
+                    if rotation_type.startswith("euler_angles"):
+                        rotation_type = "euler_angles"
+                    statistics = self._DEFAULT_MIN_MAX_STATISTICS[rotation_type]
+                else:
+                    # Use computed statistics for quaternions
+                    statistics = self.rotation_statistics.get(key, self._DEFAULT_MIN_MAX_STATISTICS["quaternion"])
+                
+                self._rotation_normalizers[key] = Normalizer(
+                    mode=self.rotation_normalization_modes[key], 
+                    statistics=statistics
+                )
+
     def apply(self, data: dict[str, Any]) -> dict[str, Any]:
         for key in self.apply_to:
             if key not in data:
@@ -485,13 +566,36 @@ class StateActionTransform(InvertibleModalityTransform):
                 assert (
                     data[key].dtype == self._input_dtypes[key]
                 ), f"All states corresponding to the same key must be of the same dtype, input dtype: {data[key].dtype}, expected dtype: {self._input_dtypes[key]}"
-            # Rotate the state
             state = data[key]
-            if key in self._rotation_transformers:
-                state = self._rotation_transformers[key].forward(state)
-            # Normalize the state
-            if key in self._normalizers:
-                state = self._normalizers[key].forward(state)
+            
+            if key in self.pose_keys:
+                # Handle pose data (position + rotation)
+                # Split into position (first 3) and rotation (last 4)
+                position = state[..., :3]
+                rotation = state[..., 3:7]
+                
+                # Transform position
+                if key in self._position_normalizers:
+                    position = self._position_normalizers[key].forward(position)
+                
+                # Transform rotation
+                if key in self._rotation_transformers:
+                    rotation = self._rotation_transformers[key].forward(rotation)
+                if key in self._rotation_normalizers:
+                    rotation = self._rotation_normalizers[key].forward(rotation)
+                
+                # Concatenate back
+                state = torch.cat([position, rotation], dim=-1)
+                
+            else:
+                # Handle regular (non-pose) data
+                # Rotate the state
+                if key in self._rotation_transformers:
+                    state = self._rotation_transformers[key].forward(state)
+                # Normalize the state
+                if key in self._normalizers:
+                    state = self._normalizers[key].forward(state)
+            
             data[key] = state
         return data
 
@@ -503,12 +607,45 @@ class StateActionTransform(InvertibleModalityTransform):
             assert isinstance(
                 state, torch.Tensor
             ), f"Unexpected state type: {type(state)}. Expected type: {torch.Tensor}"
-            # Unnormalize the state
-            if key in self._normalizers:
-                state = self._normalizers[key].inverse(state)
-            # Change the state back to its original representation
-            if key in self._rotation_transformers:
-                state = self._rotation_transformers[key].inverse(state)
+            if key in self.pose_keys:
+                # Handle pose data (position + rotation)
+                # Get the rotation dimension after potential transformation
+                if key in self._rotation_transformers:
+                    # Get output dimension of rotation transformer
+                    rot_dim = {
+                        "euler_angles": 3,
+                        "quaternion": 4,
+                        "rotation_6d": 6,
+                        "axis_angle": 3
+                    }.get(self.target_rotations.get(key, "quaternion"), 4)
+                else:
+                    rot_dim = 4  # quaternion
+                
+                # Split into position and rotation
+                position = state[..., :3]
+                rotation = state[..., 3:3+rot_dim]
+                
+                # Reverse rotation transformations
+                if key in self._rotation_normalizers:
+                    rotation = self._rotation_normalizers[key].inverse(rotation)
+                if key in self._rotation_transformers:
+                    rotation = self._rotation_transformers[key].inverse(rotation)
+                
+                # Reverse position transformations
+                if key in self._position_normalizers:
+                    position = self._position_normalizers[key].inverse(position)
+                
+                # Concatenate back to original 7D format
+                state = torch.cat([position, rotation], dim=-1)
+                
+            else:
+                # Handle regular (non-pose) data
+                # Unnormalize the state
+                if key in self._normalizers:
+                    state = self._normalizers[key].inverse(state)
+                # Change the state back to its original representation
+                if key in self._rotation_transformers:
+                    state = self._rotation_transformers[key].inverse(state)
             assert isinstance(
                 state, torch.Tensor
             ), f"State should be tensor after unapplying transformations, but got {type(state)}"

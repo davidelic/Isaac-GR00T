@@ -77,6 +77,7 @@ class Gr00tPolicy(BasePolicy):
         modality_config: Dict[str, ModalityConfig],
         modality_transform: ComposedModalityTransform,
         policy_aggregator_cfg: Dict[str, Any],
+        rtc_cfg: Dict[str, Any],
         denoising_steps: Optional[int] = None,
         device: Union[int, str] = "cuda" if torch.cuda.is_available() else "cpu",
     ):
@@ -134,7 +135,7 @@ class Gr00tPolicy(BasePolicy):
         )
         self.policy_step_cnt = 0
         self.policy_update_every = 1
-        
+        self.rtc_cfg = rtc_cfg
         
 
     def apply_transforms(self, obs: Dict[str, Any]) -> Dict[str, Any]:
@@ -207,6 +208,23 @@ class Gr00tPolicy(BasePolicy):
         print(f"observations: {observations.keys()}")
         normalized_input = self.apply_transforms(observations)
         print(f"normalized_input: {normalized_input.keys()}")
+        
+        if self.rtc_cfg is not None:
+            self.model.action_head.num_inference_timesteps = self.rtc_cfg.get(
+                "denoising_steps", 16
+            )  # TODO: hardcoded to default 16
+            self.model.action_head.config.inference_rtc_overlap_steps = self.rtc_cfg.get(
+                "rtc_overlap_steps", None
+            )
+            self.model.action_head.config.inference_rtc_frozen_steps = self.rtc_cfg.get(
+                "rtc_frozen_steps", None
+            )
+            # check if rtc_steps is greater than rtc_freeze_steps if they are defined or non-None
+            if "rtc_overlap_steps" in self.rtc_cfg and self.rtc_cfg["rtc_overlap_steps"] is not None:
+                assert (
+                    self.model.action_head.config.inference_rtc_overlap_steps
+                    >= self.model.action_head.config.inference_rtc_frozen_steps
+                ), "rtc_overlap_steps must be greater than or equal to rtc_frozen_steps"
 
         normalized_action = self._get_action_from_normalized_input(normalized_input)
         unnormalized_action = self._get_unnormalized_action(normalized_action)

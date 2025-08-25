@@ -152,6 +152,14 @@ class FlowmatchingActionHeadConfig(PretrainedConfig):
     use_vlln: bool = field(default=True)
 
     vl_self_attention_cfg: dict = field(default=None)
+    
+    inference_rtc_overlap_steps: int = field(
+        default=None, metadata={"help": "Real-time chunking full overlap steps for inference."}
+    )
+    inference_rtc_frozen_steps: int = field(
+        default=None, metadata={"help": "Real-time chunking freeze steps for inference."}
+    )
+    rtc_ramp_rate: float = field(default=6.0, metadata={"help": "Ramp rate for real-time chunking."})
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
@@ -366,10 +374,46 @@ class FlowmatchingActionHead(nn.Module):
             dtype=vl_embeds.dtype,
             device=device,
         )
-
+        # Real-time chunking. NOTE(YL): simple implementation of RTC, can be improved with better guidance impl
+        # this treats the action sequence as a in-painting problem, if the inference_rtc_size is provided, we will take
+        # the "action" from the action_input and take the last inference_rtc_size steps as the initial actions
+        use_rtc = False
+        print(f"action_input: {action_input.keys()}")
+        for key in action_input.keys():
+            print(f"{key}: {action_input[key].shape}")
+        if self.config.inference_rtc_overlap_steps is not None and "action" in action_input.keys():
+            print(f"Using RTC with overlap steps: {self.config.inference_rtc_overlap_steps}")
+            assert (
+                "action" in action_input.keys()
+            ), "action must be in action_input when using Realtime chunking"
+            # take the last prior action [batch, inference_rtc_overlap_steps, action_dim] and move it as the first inference_rtc_overlap_steps steps
+            actions[:, : self.config.inference_rtc_overlap_steps, :] = action_input["action"][
+                :, -self.config.inference_rtc_overlap_steps :, :
+            ]
+            use_rtc = True
         num_steps = self.num_inference_timesteps
         dt = 1.0 / num_steps
-
+        vel_strength = torch.ones_like(actions)
+        if use_rtc:
+            # we will only freeze the freeze steps, which is the entire e2e forward pass time.
+            vel_strength[:, : self.config.inference_rtc_frozen_steps, :] = 0.0
+            # # NOTE: use an exponential ramp strength to set the remaining unfrozen rtc_steps
+            intermediate_steps = (
+                self.config.inference_rtc_overlap_steps - self.config.inference_rtc_frozen_steps
+            )
+            # # Create exponential ramp from 0 to 1 over intermediate steps
+            t = torch.linspace(0.0, 1.0, intermediate_steps + 2, device=device)
+            ramp = 1 - torch.exp(-self.config.rtc_ramp_rate * t)
+            ramp = ramp / ramp[-1].clamp_min(1e-8)  # normalize to [0,1]
+            ramp = ramp[
+                1:-1
+            ]  # we will only take the middle part of the ramp, ignore the 0.0 and 1.0
+            # Apply ramp to the intermediate steps [batch, intermediate_steps, action_dim]
+            vel_strength[
+                :,
+                self.config.inference_rtc_frozen_steps : self.config.inference_rtc_overlap_steps,
+                :,
+            ] = ramp[None, :, None].to(device)
         # Run denoising steps.
         for t in range(num_steps):
             t_cont = t / float(num_steps)  # e.g. goes 0, 1/N, 2/N, ...
@@ -402,7 +446,7 @@ class FlowmatchingActionHead(nn.Module):
             pred_velocity = pred[:, -self.action_horizon :]
 
             # Update actions using euler integration.
-            actions = actions + dt * pred_velocity
+            actions = actions + dt * pred_velocity * vel_strength
         return BatchFeature(data={"action_pred": actions})
 
     @property

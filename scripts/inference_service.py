@@ -59,6 +59,8 @@ class ArgsConfig:
     train_cfg: str = None
     """Path to the training YAML file."""
     
+    rtc_enabled: bool = False
+    """Whether to use real-time chunking."""
 
 #####################################################################################
 
@@ -78,7 +80,7 @@ def main(args: ArgsConfig):
         # see gr00t/utils/data.py for more details
         if args.train_cfg:
             from srl_il.models.gr00t_faive.inference import build_from_yaml
-            modality_config, modality_transform, policy_aggregator_cfg = build_from_yaml(args.train_cfg)
+            modality_config, modality_transform, policy_aggregator_cfg, rtc_cfg = build_from_yaml(args.train_cfg)
             embodiment_tag = args.embodiment_tag
         else:
             data_config = DATA_CONFIG_MAP[args.data_config]
@@ -93,6 +95,7 @@ def main(args: ArgsConfig):
             embodiment_tag=embodiment_tag,
             denoising_steps=args.denoising_steps,
             policy_aggregator_cfg=policy_aggregator_cfg,
+            rtc_cfg=rtc_cfg if args.rtc_enabled else None
         )
 
         # Start the server
