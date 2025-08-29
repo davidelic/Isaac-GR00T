@@ -378,9 +378,6 @@ class FlowmatchingActionHead(nn.Module):
         # this treats the action sequence as a in-painting problem, if the inference_rtc_size is provided, we will take
         # the "action" from the action_input and take the last inference_rtc_size steps as the initial actions
         use_rtc = False
-        print(f"action_input: {action_input.keys()}")
-        for key in action_input.keys():
-            print(f"{key}: {action_input[key].shape}")
         if self.config.inference_rtc_overlap_steps is not None and "action" in action_input.keys():
             print(f"Using RTC with overlap steps: {self.config.inference_rtc_overlap_steps}")
             assert (

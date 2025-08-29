@@ -108,7 +108,6 @@ class Normalizer:
         assert isinstance(
             x, torch.Tensor
         ), f"Unexpected input type: {type(x)}. Expected type: {torch.Tensor}"
-
         # Normalize the tensor
         if self.mode == "q99":
             # Range of q99 is [-1, 1]
@@ -490,7 +489,7 @@ class StateActionTransform(InvertibleModalityTransform):
             if key in self._rotation_transformers:
                 state = self._rotation_transformers[key].forward(state)
             # Normalize the state
-            if key in self._normalizers:
+            if key in self._normalizers:                
                 state = self._normalizers[key].forward(state)
             data[key] = state
         return data
@@ -623,7 +622,7 @@ class AbsoluteToRelativeAction(InvertibleModalityTransform):
     """
 
     # Pairs of (action_key, state_key)
-    action_state_pairs: list[tuple[str, str]] = Field(..., description="Pairs of ('action.key', 'state.key') to process")
+    action_state_pairs: list[tuple[tuple[str, str], tuple[str, str]]] = Field(..., description="Pairs of (('action.key_pos', 'action.key_rot'), ('state.key_pos', 'state.key_rot')) to process")
     mode: str = Field(default="joint", description="'joint' or 'pose'")
     in_ee_frame: bool = Field(default=False, description="When mode='pose', express translation in EE frame")
     rotation_out: str = Field(default="quaternion", description="Output rotation format")
@@ -694,27 +693,29 @@ class AbsoluteToRelativeAction(InvertibleModalityTransform):
         )
         return rotated[..., :3]
 
-    def _compute_relative_pose(self, action: torch.Tensor, state: torch.Tensor) -> torch.Tensor:
+    def _compute_relative_pose(self, action_pos: torch.Tensor, action_rot: torch.Tensor, state_pos: torch.Tensor, state_rot: torch.Tensor) -> torch.Tensor:
         # action/state: [T, 7] -> [T, 6] (xyz + axis-angle)
-        assert action.shape[-1] == 7 and state.shape[-1] == 7, f"Expected pose dims 7, got {action.shape[-1]}, {state.shape[-1]}"
-        ref = state[[-1], :]  # [1, 7]
-        self._cached_ref_pose = ref
-        t_rel = action[..., :3] - ref[..., :3]
+        assert action_pos.shape[-1] == 3 and state_pos.shape[-1] == 3, f"Expected position dims 3, got {action_pos.shape[-1]}, {state_pos.shape[-1]}"
+        assert action_rot.shape[-1] == 4 and state_rot.shape[-1] == 4, f"Expected rotation dims 4, got {action_rot.shape[-1]}, {state_rot.shape[-1]}"
+        ref_pos = state_pos[[-1], :]  # [1, 3]
+        ref_rot = state_rot[[-1], :]  # [1, 4]
+        self._cached_ref_pos = ref_pos.clone()
+        self._cached_ref_rot = ref_rot.clone()
+        t_rel = action_pos - ref_pos
         if self.in_ee_frame:
-            ref_q = ref[..., 3:7].expand_as(action[..., 3:7])
+            ref_q = ref_rot.expand_as(action_rot)
             t_rel = self._rotate_vec_by_quat(t_rel, self._quat_inverse(ref_q))
-        q_ref = ref[..., 3:7].expand_as(action[..., 3:7])
-        q_rel = self._quat_multiply(self._quat_inverse(q_ref), action[..., 3:7])
+        q_ref = ref_rot.expand_as(action_rot)
+        q_rel = self._quat_multiply(self._quat_inverse(q_ref), action_rot)
         
         if self.rotation_out == "rotation_6d":
             # reuse the existing RotationTransform in this file
             r6d = RotationTransform(from_rep="quaternion", to_rep="rotation_6d").forward(q_rel)
-            rel = torch.cat([t_rel, r6d], dim=-1)  # [T, 9]
+            rel = t_rel, r6d
         elif self.rotation_out == "axis_angle":
-            rel = torch.cat([t_rel, self._quat_to_axis_angle(q_rel)], dim=-1)  # [T, 6]
+            rel = t_rel, self._quat_to_axis_angle(q_rel)
         else:  # quaternion
-            rel = torch.cat([t_rel, q_rel], dim=-1)  # [T, 7]
-
+            rel = t_rel, q_rel
         return rel
 
     def _invert_relative_joint(self, rel: torch.Tensor, ref: torch.Tensor) -> torch.Tensor:
@@ -763,28 +764,50 @@ class AbsoluteToRelativeAction(InvertibleModalityTransform):
         # Reset cache per call
         self._cached_refs.clear()
         for action_key, state_key in self.action_state_pairs:
-            state_present = state_key in data and isinstance(data[state_key], torch.Tensor)
-            action_present = action_key in data and isinstance(data[action_key], torch.Tensor)
+            if self.mode == "pose":
+                action_pos_key, action_rot_key = action_key
+                state_pos_key, state_rot_key = state_key
+                state_present = state_pos_key in data and isinstance(data[state_pos_key], torch.Tensor)
+                action_present = action_pos_key in data and isinstance(data[action_pos_key], torch.Tensor)
 
-            # Always cache the reference state if available (supports inference path where actions are absent)
-            if state_present:
-                # Store the reference state with proper shape handling
-                ref_state = data[state_key][-1:, :]  # [1, D] - ensure proper shape
-                self._cached_refs[action_key] = ref_state.clone()
+                # Always cache the reference state if available (supports inference path where actions are absent)
+                if state_present:
+                    # Store the reference state with proper shape handling
+                    ref_state_pos = data[state_pos_key][-1:, :]  # [1, D] - ensure proper shape
+                    ref_state_rot = data[state_rot_key][-1:, :]  # [1, D] - ensure proper shape
+                    self._cached_refs[action_pos_key] = ref_state_pos.clone()
+                    self._cached_refs[action_rot_key] = ref_state_rot.clone()
 
-            if not (state_present and action_present):
-                # Nothing to convert for this pair
-                continue
+                if not (state_present and action_present):
+                    # Nothing to convert for this pair
+                    continue
 
-            action = data[action_key]
-            state = data[state_key]
-            if self.mode == "joint":
+                action_pos = data[action_pos_key]
+                action_rot = data[action_rot_key]
+                state_pos = data[state_pos_key]
+                state_rot = data[state_rot_key]
+                rel_pos, rel_rot = self._compute_relative_pose(action_pos, action_rot, state_pos, state_rot)
+                data[action_pos_key] = rel_pos
+                data[action_rot_key] = rel_rot
+                
+            elif self.mode == "joint":
+                state_present = state_key in data and isinstance(data[state_key], torch.Tensor)
+                action_present = action_key in data and isinstance(data[action_key], torch.Tensor)
+
+                if not (state_present and action_present):
+                    # Nothing to convert for this pair
+                    continue
+                if state_present:
+                    ref_state = data[state_key][-1:, :]  # [1, D] - ensure proper shape
+                    self._cached_refs[action_key] = ref_state.clone()
+
+                action_pos = data[action_pos_key]
+                action_rot = data[action_rot_key]
+                state_pos = data[state_pos_key]
+                state_rot = data[state_rot_key]
                 rel = self._compute_relative_joint(action, state)
-            elif self.mode == "pose":
-                rel = self._compute_relative_pose(action, state)
-            else:
-                raise ValueError(f"Unknown mode: {self.mode}")
-            data[action_key] = rel
+                data[action_key] = rel
+
         return data
 
     def unapply(self, data: dict[str, Any]) -> dict[str, Any]:
@@ -792,18 +815,34 @@ class AbsoluteToRelativeAction(InvertibleModalityTransform):
             return data
         # Use cached references to reconstruct absolute actions
         for action_key, state_key in self.action_state_pairs:
-            if action_key not in data or action_key not in self._cached_refs:
-                continue
-            rel = data[action_key]
-            ref = self._cached_refs[action_key]
-            assert isinstance(rel, torch.Tensor) and isinstance(ref, torch.Tensor)
-            if self.mode == "joint":
+            if self.mode == "pose":
+                action_pos_key, action_rot_key = action_key
+                state_pos_key, state_rot_key = state_key
+                state_present = state_pos_key in data and isinstance(data[state_pos_key], torch.Tensor)
+                action_present = action_pos_key in data and isinstance(data[action_pos_key], torch.Tensor)
+                if not (state_present and action_present):
+                    # Nothing to convert for this pair
+                    continue
+                rel_pos, rel_rot = data[action_key]
+                ref_pos, ref_rot = self._cached_refs[action_key]
+                assert isinstance(rel_pos, torch.Tensor) and isinstance(ref_pos, torch.Tensor)
+                assert isinstance(rel_rot, torch.Tensor) and isinstance(ref_rot, torch.Tensor)
+                abs_action_pos = self._invert_relative_pose(rel_pos, ref_pos)
+                abs_action_rot = self._invert_relative_pose(rel_rot, ref_rot)
+                data[action_pos_key] = abs_action_pos
+                data[action_rot_key] = abs_action_rot
+            elif self.mode == "joint":
+                action_key = action_key
+                state_key = state_key
+                state_present = state_key in data and isinstance(data[state_key], torch.Tensor)
+                action_present = action_key in data and isinstance(data[action_key], torch.Tensor)
+                if not (state_present and action_present):
+                    # Nothing to convert for this pair
+                    continue
+                rel = data[action_key]
+                ref = self._cached_refs[action_key]
+                assert isinstance(rel, torch.Tensor) and isinstance(ref, torch.Tensor)
                 abs_action = self._invert_relative_joint(rel, ref)
-            elif self.mode == "pose":
-                abs_action = self._invert_relative_pose(rel, ref)
-            else:
-                raise ValueError(f"Unknown mode: {self.mode}")
-            data[action_key] = abs_action
-        # Clear cache after use
+                data[action_key] = abs_action
         self._cached_refs.clear()
         return data

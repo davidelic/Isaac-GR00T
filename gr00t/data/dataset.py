@@ -56,6 +56,9 @@ LE_ROBOT_STATS_FILENAME = "meta/stats.json"
 LE_ROBOT_DATA_FILENAME = "data/*/*.parquet"
 
 
+
+
+
 def calculate_dataset_statistics(parquet_paths: list[Path]) -> dict:
     """Calculate the dataset statistics of all columns for a list of parquet files."""
     # Dataset statistics
@@ -323,9 +326,14 @@ class LeRobotSingleDataset(Dataset):
 
         # 2. Dataset statistics
         stats_path = self.dataset_path / LE_ROBOT_STATS_FILENAME
+        relative_stats_path = self.dataset_path / "meta/relative_stats.json"
         try:
             with open(stats_path, "r") as f:
-                le_statistics = json.load(f)
+                le_statistics:dict = json.load(f)
+            if relative_stats_path.exists():
+                with open(relative_stats_path, "r") as f:
+                    relative_statistics = json.load(f)
+                le_statistics.update(relative_statistics)
             for stat in le_statistics.values():
                 DatasetStatisticalValues.model_validate(stat)
         except (FileNotFoundError, ValidationError) as e:
@@ -349,9 +357,12 @@ class LeRobotSingleDataset(Dataset):
                         state_action_meta.start,
                         state_action_meta.end,
                     )
+                    print(f"our_modality: {our_modality}")
+                    print(f"subkey: {subkey}")
+                    print(f"stat_name: {stat_name}")
+                    print(f"Indices: {indices}")
                     stat = np.array(le_statistics[le_modality][stat_name])
-                    dataset_statistics[our_modality][subkey][stat_name] = stat[indices].tolist()
-
+                    dataset_statistics[our_modality][subkey][stat_name] = stat[indices].tolist() if stat.ndim == 1 else stat[:, indices].tolist()
         # 3. Full dataset metadata
         metadata = DatasetMetadata(
             statistics=dataset_statistics,  # type: ignore
@@ -1150,7 +1161,9 @@ class LeRobotMixtureDataset(Dataset):
 
         for modality in modality_keys:
             # Number of dimensions (assuming consistent across tasks)
-            num_dims = len(per_task_stats[0][modality]["mean"])
+            # check how many dimensions per task are there
+            num_dims = np.array(per_task_stats[0][modality]["mean"]).shape
+            # num_dims = len(per_task_stats[0][modality]["mean"])
 
             # Initialize accumulators for means and variances
             weighted_means = np.zeros(num_dims)
