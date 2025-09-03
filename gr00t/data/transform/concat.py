@@ -146,6 +146,9 @@ class ConcatTransform(InvertibleModalityTransform):
                 target_shapes = [self.action_dims[key]]
                 if self.is_rotation_key(key):
                     target_shapes.append(3)  # Allow for axis angle
+                # if data shape is 6 means it is in rotation_6d representation, so change the self.action_dims[key] to 6 #TODO: remove this and not hardcode the 6
+                if data[key].shape[-1] == 6:
+                    self.action_dims[key] = 6
                 assert (
                     self.action_dims[key] == data[key].shape[-1]
                 ), f"Action dim mismatch for {key=}, {self.action_dims[key]=}, {data[key].shape[-1]=}"
