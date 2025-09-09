@@ -731,8 +731,6 @@ class AbsoluteToRelativeAction(InvertibleModalityTransform):
                         ref_state_pos = ref_state_pos.squeeze(0)
                         ref_state_rot = ref_state_rot.squeeze(0)
                     assert ref_state_pos.ndim == 2 and ref_state_rot.ndim == 2, f"Expected 2D tensors, got {ref_state_pos.ndim}, {ref_state_rot.ndim}"
-                    print(f"ref_state_pos.shape: {ref_state_pos.shape}, ref_state_rot.shape: {ref_state_rot.shape}")
-                    print(f"Keys: {action_pos_key}, {action_rot_key}, {state_pos_key}, {state_rot_key}")
                     self._cached_refs[action_pos_key] = ref_state_pos.clone()
                     self._cached_refs[action_rot_key] = ref_state_rot.clone()
 
@@ -782,6 +780,8 @@ class AbsoluteToRelativeAction(InvertibleModalityTransform):
                     continue
                 rel_pos = data[action_pos_key]
                 rel_rot = data[action_rot_key]
+                print(f"rel_pos.shape: {rel_pos.shape}, rel_rot.shape: {rel_rot.shape}")
+                print("cached refs: ", self._cached_refs)
                 ref_pos = self._cached_refs[action_pos_key]
                 ref_rot = self._cached_refs[action_rot_key]
                 assert isinstance(rel_pos, torch.Tensor) and isinstance(ref_pos, torch.Tensor)

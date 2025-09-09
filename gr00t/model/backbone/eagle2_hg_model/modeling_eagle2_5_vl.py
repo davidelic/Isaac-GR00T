@@ -270,6 +270,7 @@ class Eagle2_5_VLForConditionalGeneration(Eagle2_5_VLPreTrainedModel, Generation
         logits = outputs.logits
 
         loss = None
+        token_accuracy = 0.0
         if labels is not None:
             # Shift so that tokens < n predict n
             shift_logits = logits[..., :-1, :].contiguous()
@@ -283,7 +284,6 @@ class Eagle2_5_VLForConditionalGeneration(Eagle2_5_VLPreTrainedModel, Generation
             loss = loss_fct(shift_logits, shift_labels)
             # Compute token-level accuracy
             token_accuracy = self.token_accuracy(logits, labels)
-            print(f"Token accuracy: {token_accuracy}")
 
         if not return_dict:
             output = (logits,) + outputs[1:]
@@ -295,8 +295,7 @@ class Eagle2_5_VLForConditionalGeneration(Eagle2_5_VLPreTrainedModel, Generation
             past_key_values=outputs.past_key_values,
             hidden_states=outputs.hidden_states,
             attentions=outputs.attentions,
-            token_accuracy=token_accuracy,
-        )
+        ), token_accuracy
 
     def pixel_shuffle(self, x, scale_factor=0.5):
         n, w, h, c = x.size()
