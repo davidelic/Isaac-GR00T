@@ -727,6 +727,12 @@ class AbsoluteToRelativeAction(InvertibleModalityTransform):
                     # Store the reference state with proper shape handling
                     ref_state_pos = data[state_pos_key][-1:, :]  # [1, D] - ensure proper shape
                     ref_state_rot = data[state_rot_key][-1:, :]  # [1, D] - ensure proper shape
+                    if ref_state_pos.ndim == 3:
+                        ref_state_pos = ref_state_pos.squeeze(0)
+                        ref_state_rot = ref_state_rot.squeeze(0)
+                    assert ref_state_pos.ndim == 2 and ref_state_rot.ndim == 2, f"Expected 2D tensors, got {ref_state_pos.ndim}, {ref_state_rot.ndim}"
+                    print(f"ref_state_pos.shape: {ref_state_pos.shape}, ref_state_rot.shape: {ref_state_rot.shape}")
+                    print(f"Keys: {action_pos_key}, {action_rot_key}, {state_pos_key}, {state_rot_key}")
                     self._cached_refs[action_pos_key] = ref_state_pos.clone()
                     self._cached_refs[action_rot_key] = ref_state_rot.clone()
 

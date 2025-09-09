@@ -281,6 +281,9 @@ class Eagle2_5_VLForConditionalGeneration(Eagle2_5_VLPreTrainedModel, Generation
             # Enable model parallelism
             shift_labels = shift_labels.to(shift_logits.device)
             loss = loss_fct(shift_logits, shift_labels)
+            # Compute token-level accuracy
+            token_accuracy = token_accuracy(logits, labels)
+            print(f"Token accuracy: {token_accuracy}")
 
         if not return_dict:
             output = (logits,) + outputs[1:]
@@ -292,6 +295,7 @@ class Eagle2_5_VLForConditionalGeneration(Eagle2_5_VLPreTrainedModel, Generation
             past_key_values=outputs.past_key_values,
             hidden_states=outputs.hidden_states,
             attentions=outputs.attentions,
+            token_accuracy=token_accuracy,
         )
 
     def pixel_shuffle(self, x, scale_factor=0.5):
@@ -307,7 +311,33 @@ class Eagle2_5_VLForConditionalGeneration(Eagle2_5_VLPreTrainedModel, Generation
 
         x = x.permute(0, 2, 1, 3).contiguous()
         return x
+    
+    def token_accuracy(logits: torch.Tensor, targets: torch.Tensor, ignore_index: int = -100):
+        """
+        Computes token-level accuracy.
 
+        Args:
+            logits: [batch_size, seq_len, vocab_size] raw predictions from the model
+            targets: [batch_size, seq_len] ground-truth token ids
+            ignore_index: label id to ignore (e.g. padding or masked tokens)
+
+        Returns:
+            accuracy: float, % of correctly predicted tokens (0.0 - 1.0)
+        """
+        # Get predicted token ids
+        preds = torch.argmax(logits, dim=-1)  # [batch_size, seq_len]
+
+        # Mask out ignored positions
+        mask = targets != ignore_index
+        correct = (preds == targets) & mask
+
+        # Avoid division by zero if mask is empty
+        if mask.sum() == 0:
+            return torch.tensor(0.0, device=logits.device)
+
+        accuracy = correct.sum().float() / mask.sum().float()
+        return accuracy
+    
     def extract_feature(self, pixel_values):
         if self.select_layer == -1:
             vit_embeds = self.vision_model(

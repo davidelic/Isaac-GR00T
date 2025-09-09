@@ -178,6 +178,7 @@ class GR00T_N1_5(PreTrainedModel):
         # Get individual losses
         backbone_loss = backbone_outputs.get("backbone_loss", None)
         action_head_loss = action_head_outputs.get("loss", None)
+        token_accuracy = backbone_outputs.get("token_accuracy", None)
         
         # Apply weights and combine
         total_loss = 0.0
@@ -194,6 +195,9 @@ class GR00T_N1_5(PreTrainedModel):
             # Log action head loss separately
             action_head_outputs["action_head_loss"] = action_head_loss
             action_head_outputs["weighted_action_head_loss"] = weighted_action_head_loss
+
+        if token_accuracy is not None:
+            action_head_outputs["token_accuracy"] = token_accuracy
         
         # Set the total weighted loss
         action_head_outputs["loss"] = total_loss
