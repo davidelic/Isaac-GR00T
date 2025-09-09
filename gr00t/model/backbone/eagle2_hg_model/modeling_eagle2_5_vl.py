@@ -282,7 +282,7 @@ class Eagle2_5_VLForConditionalGeneration(Eagle2_5_VLPreTrainedModel, Generation
             shift_labels = shift_labels.to(shift_logits.device)
             loss = loss_fct(shift_logits, shift_labels)
             # Compute token-level accuracy
-            token_accuracy = token_accuracy(logits, labels)
+            token_accuracy = self.token_accuracy(logits, labels)
             print(f"Token accuracy: {token_accuracy}")
 
         if not return_dict:
@@ -312,7 +312,7 @@ class Eagle2_5_VLForConditionalGeneration(Eagle2_5_VLPreTrainedModel, Generation
         x = x.permute(0, 2, 1, 3).contiguous()
         return x
     
-    def token_accuracy(logits: torch.Tensor, targets: torch.Tensor, ignore_index: int = -100):
+    def token_accuracy(self, logits: torch.Tensor, targets: torch.Tensor, ignore_index: int = -100):
         """
         Computes token-level accuracy.
 
