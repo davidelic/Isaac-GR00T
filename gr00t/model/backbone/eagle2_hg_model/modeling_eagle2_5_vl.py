@@ -5,7 +5,7 @@
 # --------------------------------------------------------
 
 import inspect
-from typing import List, Optional, Tuple, Union
+from typing import List, Optional, Tuple, Union, Dict
 
 import torch
 import torch.utils.checkpoint as cp
@@ -270,7 +270,7 @@ class Eagle2_5_VLForConditionalGeneration(Eagle2_5_VLPreTrainedModel, Generation
         logits = outputs.logits
 
         loss = None
-        token_accuracy = 0.0
+        token_metrics = {}
         if labels is not None:
             # Shift so that tokens < n predict n
             shift_logits = logits[..., :-1, :].contiguous()
@@ -283,7 +283,7 @@ class Eagle2_5_VLForConditionalGeneration(Eagle2_5_VLPreTrainedModel, Generation
             shift_labels = shift_labels.to(shift_logits.device)
             loss = loss_fct(shift_logits, shift_labels)
             # Compute token-level accuracy
-            token_accuracy = self.token_accuracy(logits, labels)
+            token_metrics = self.token_metrics(logits, labels)
 
         if not return_dict:
             output = (logits,) + outputs[1:]
@@ -295,7 +295,7 @@ class Eagle2_5_VLForConditionalGeneration(Eagle2_5_VLPreTrainedModel, Generation
             past_key_values=outputs.past_key_values,
             hidden_states=outputs.hidden_states,
             attentions=outputs.attentions,
-        ), token_accuracy
+        ), token_metrics
 
     def pixel_shuffle(self, x, scale_factor=0.5):
         n, w, h, c = x.size()
@@ -311,31 +311,62 @@ class Eagle2_5_VLForConditionalGeneration(Eagle2_5_VLPreTrainedModel, Generation
         x = x.permute(0, 2, 1, 3).contiguous()
         return x
     
-    def token_accuracy(self, logits: torch.Tensor, targets: torch.Tensor, ignore_index: int = -100):
+    def token_metrics(
+        self,
+        logits: torch.Tensor,          # [B, T, V]
+        targets: torch.Tensor,         # [B, T]
+        ignore_index: int = -100,
+        topk: Tuple[int, ...] = (1, 8, 10),
+    ) -> Dict[str, torch.Tensor]:
         """
-        Computes token-level accuracy.
-
-        Args:
-            logits: [batch_size, seq_len, vocab_size] raw predictions from the model
-            targets: [batch_size, seq_len] ground-truth token ids
-            ignore_index: label id to ignore (e.g. padding or masked tokens)
+        Computes masked top-k accuracies and perplexity over valid (non-ignored) tokens.
 
         Returns:
-            accuracy: float, % of correctly predicted tokens (0.0 - 1.0)
+            {
+            'acc@1':  tensor(...),
+            'acc@8':  tensor(...),
+            'acc@10': tensor(...),
+            'ppl':    tensor(...),   # exp(mean NLL)
+            'nll':    tensor(...),   # mean negative log-likelihood
+            'count':  tensor(...),   # number of evaluated tokens
+            }
         """
-        # Get predicted token ids
-        preds = torch.argmax(logits, dim=-1)  # [batch_size, seq_len]
+        device = logits.device
+        mask = (targets != ignore_index)                           # [B, T]
+        valid_count = mask.sum()
 
-        # Mask out ignored positions
-        mask = targets != ignore_index
-        correct = (preds == targets) & mask
+        # If nothing to evaluate, return zeros / NaNs sensibly
+        if valid_count == 0:
+            out = {f"acc@{k}": torch.tensor(0.0, device=device) for k in set(topk)}
+            out.update({
+                "ppl": torch.tensor(float("nan"), device=device),
+                "nll": torch.tensor(float("nan"), device=device),
+                "count": torch.tensor(0, device=device),
+            })
+            return out
 
-        # Avoid division by zero if mask is empty
-        if mask.sum() == 0:
-            return torch.tensor(0.0, device=logits.device)
+        # --- Per-token NLL (masked) and perplexity ---
+        log_probs = torch.log_softmax(logits, dim=-1)              # [B, T, V]
+        tgt_clamped = torch.clamp(targets, min=0)                  # avoid -inf gather (ignored later by mask)
+        nll = -log_probs.gather(dim=-1, index=tgt_clamped.unsqueeze(-1)).squeeze(-1)  # [B, T]
+        nll = nll[mask]                                            # [N_valid]
+        mean_nll = nll.mean()
+        ppl = torch.exp(mean_nll)
 
-        accuracy = correct.sum().float() / mask.sum().float()
-        return accuracy
+        # --- Top-k accuracies (masked) ---
+        Kmax = max(topk)
+        topk_idx = torch.topk(logits, k=Kmax, dim=-1).indices      # [B, T, Kmax]
+        # For each k, check if target is in top-k set
+        tgt_exp = targets.unsqueeze(-1)                            # [B, T, 1]
+        results = {}
+        for k in sorted(set(topk)):
+            hit_k = (topk_idx[..., :k] == tgt_exp).any(dim=-1)     # [B, T]
+            acc_k = (hit_k & mask).sum().float() / valid_count.float()
+            results[f"acc@{k}"] = acc_k
+
+        results.update({"ppl": ppl, "nll": mean_nll, "count": valid_count})
+        return results
+
     
     def extract_feature(self, pixel_values):
         if self.select_layer == -1:

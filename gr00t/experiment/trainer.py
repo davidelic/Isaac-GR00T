@@ -83,8 +83,11 @@ class DualBrainTrainer(transformers.Trainer):
                 "train/weighted_backbone_loss": outputs.get("weighted_backbone_loss", 0).item() if "weighted_backbone_loss" in outputs else 0,
                 "train/weighted_action_head_loss": outputs.get("weighted_action_head_loss", 0).item() if "weighted_action_head_loss" in outputs else 0,
                 "train/total_loss": outputs.get("total_loss", 0).item() if "total_loss" in outputs else 0,
-                "train/token_accuracy": outputs.get("token_accuracy", 0).item() if "token_accuracy" in outputs else 0,
             })
+            for key, value in outputs.get("token_metrics", {}).items():
+                self.log({
+                    f"train/token_{key}": value.item()
+                })
         return (loss, outputs) if return_outputs else loss
 
     def create_optimizer(self):
