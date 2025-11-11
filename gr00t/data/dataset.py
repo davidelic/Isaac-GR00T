@@ -59,7 +59,7 @@ LE_ROBOT_DATA_FILENAME = "data/*/*.parquet"
 
 
 
-def calculate_dataset_statistics(parquet_paths: list[Path]) -> dict:
+def calculate_dataset_statistics(le_modality_meta, transforms, parquet_paths: list[Path]) -> dict:
     """Calculate the dataset statistics of all columns for a list of parquet files."""
     # Dataset statistics
     all_low_dim_data_list = []
@@ -73,14 +73,41 @@ def calculate_dataset_statistics(parquet_paths: list[Path]) -> dict:
         parquet_data = parquet_data
         all_low_dim_data_list.append(parquet_data)
     all_low_dim_data = pd.concat(all_low_dim_data_list, axis=0)
+    
+    transform_statistics = ComposedModalityTransform(transforms=[t for t in transforms.transforms if t.change_stats])
+   
+    data_dict = all_low_dim_data.to_dict(orient="list")
+    mapped_dict = dict()
+    for modality in ("state", "action"):
+        le_state_action_meta = getattr(le_modality_meta, modality)
+        for subkey, meta in le_state_action_meta.items():
+            le_key = meta.original_key if meta.original_key is not None else subkey
+            if le_key not in data_dict:
+                continue
+            mapped_key = f"{modality}.{subkey}"
+            start, end = meta.start, meta.end
+
+            col = data_dict[le_key]
+            sliced_col = []
+            for entry in col:
+                arr = np.asarray(entry, dtype=np.float32)
+                if arr.ndim == 0:
+                    arr = arr.reshape(1)
+                sliced = arr[start:end]
+                sliced_col.append(sliced)
+            mapped_dict[mapped_key] = np.array(sliced_col)
+
+    transformed_data = transform_statistics.apply(data= mapped_dict)
+
     # Compute dataset statistics
-    dataset_statistics = {}
-    for le_modality in all_low_dim_data.columns:
-        print(f"Computing statistics for {le_modality}...")
+    dataset_statistics = {"state": {}, "action": {}}
+    for flat_key, array in transformed_data.items():
+        modality, subkey = flat_key.split(".", 1)
+        print(f"Computing statistics for {modality}...")
         np_data = np.vstack(
-            [np.asarray(x, dtype=np.float32) for x in all_low_dim_data[le_modality]]
+            [np.asarray(x, dtype=np.float32) for x in array]
         )
-        dataset_statistics[le_modality] = {
+        dataset_statistics[modality][subkey] = {
             "mean": np.mean(np_data, axis=0).tolist(),
             "std": np.std(np_data, axis=0).tolist(),
             "min": np.min(np_data, axis=0).tolist(),
@@ -144,10 +171,10 @@ class LeRobotSingleDataset(Dataset):
         else:
             self.tag = embodiment_tag
 
+        self._modality_keys = self._get_modality_keys()
         self._metadata = self._get_metadata(EmbodimentTag(self.tag))
         self._trajectory_ids, self._trajectory_lengths = self._get_trajectories()
         self._all_steps = self._get_all_steps()
-        self._modality_keys = self._get_modality_keys()
         self._delta_indices = self._get_delta_indices()
         self.set_transforms_metadata(self.metadata)
         self.set_epoch(0)
@@ -314,10 +341,17 @@ class LeRobotSingleDataset(Dataset):
             try:
                 channels = le_video_meta["shape"][le_video_meta["names"].index("channel")]
                 fps = le_video_meta["video_info"]["video.fps"]
+                print(f"Video {new_key} has {channels} channels and {fps} fps")
             except (ValueError, KeyError):
-                # channels = le_video_meta["shape"][le_video_meta["names"].index("channels")]
-                channels = le_video_meta["info"]["video.channels"]
-                fps = le_video_meta["info"]["video.fps"]
+                try:
+                    channels = le_video_meta["shape"][le_video_meta["names"].index("channels")]
+                except (ValueError, KeyError):
+                    channels = le_video_meta["info"]["video.channels"]
+                try:
+                    fps = le_video_meta["shape"][le_video_meta["names"].index("fps")]
+                except (ValueError, KeyError):
+                    fps = 10
+                    print(f"Warning: fps not found in metadata, defaulting to {fps}")
             simplified_modality_meta["video"][new_key] = {
                 "resolution": [width, height],
                 "channels": channels,
@@ -326,43 +360,19 @@ class LeRobotSingleDataset(Dataset):
 
         # 2. Dataset statistics
         stats_path = self.dataset_path / LE_ROBOT_STATS_FILENAME
-        relative_stats_path = self.dataset_path / "meta/relative_stats.json"
         try:
             with open(stats_path, "r") as f:
-                le_statistics:dict = json.load(f)
-            if relative_stats_path.exists():
-                with open(relative_stats_path, "r") as f:
-                    relative_statistics = json.load(f)
-                le_statistics.update(relative_statistics)
-            for stat in le_statistics.values():
+                dataset_statistics:dict = json.load(f)
+            for stat in dataset_statistics.values():
                 DatasetStatisticalValues.model_validate(stat)
         except (FileNotFoundError, ValidationError) as e:
             print(f"Failed to load dataset statistics: {e}")
             print(f"Calculating dataset statistics for {self.dataset_name}")
             # Get all parquet files in the dataset paths
             parquet_files = list((self.dataset_path).glob(LE_ROBOT_DATA_FILENAME))
-            le_statistics = calculate_dataset_statistics(parquet_files)
+            dataset_statistics = calculate_dataset_statistics(le_modality_meta, self.transforms, parquet_files)
             with open(stats_path, "w") as f:
-                json.dump(le_statistics, f, indent=4)
-        dataset_statistics = {}
-        for our_modality in ["state", "action"]:
-            dataset_statistics[our_modality] = {}
-            for subkey in simplified_modality_meta[our_modality]:
-                dataset_statistics[our_modality][subkey] = {}
-                state_action_meta = le_modality_meta.get_key_meta(f"{our_modality}.{subkey}")
-                assert isinstance(state_action_meta, LeRobotStateActionMetadata)
-                le_modality = state_action_meta.original_key
-                for stat_name in le_statistics[le_modality]:
-                    indices = np.arange(
-                        state_action_meta.start,
-                        state_action_meta.end,
-                    )
-                    print(f"our_modality: {our_modality}")
-                    print(f"subkey: {subkey}")
-                    print(f"stat_name: {stat_name}")
-                    print(f"Indices: {indices}")
-                    stat = np.array(le_statistics[le_modality][stat_name])
-                    dataset_statistics[our_modality][subkey][stat_name] = stat[indices].tolist() if stat.ndim == 1 else stat[:, indices].tolist()
+                json.dump(dataset_statistics, f, indent=4)
         # 3. Full dataset metadata
         metadata = DatasetMetadata(
             statistics=dataset_statistics,  # type: ignore

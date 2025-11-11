@@ -32,6 +32,10 @@ class ModalityTransform(BaseModel, ABC):
     )
     _dataset_metadata: DatasetMetadata | None = PrivateAttr(default=None)
 
+    change_stats: bool = Field(
+        default=False, description="Whether this transform changes the data statistics (e.g., normalization). Used for stats computation."
+    )
+
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
     @property
