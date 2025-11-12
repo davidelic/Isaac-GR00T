@@ -55,6 +55,7 @@ def build_eagle_processor(eagle_path: str) -> ProcessorMixin:
 def collate(features: List[dict], eagle_processor) -> dict:
     batch = {}
     keys = features[0].keys()
+    print(f"Keys: {keys}")
 
     for key in keys:
         values = [elem[key] for elem in features]
@@ -76,10 +77,14 @@ def collate(features: List[dict], eagle_processor) -> dict:
         elif key in ("pixel_values", "image_grid_thw", "attention_mask", "input_ids"):
             # Concat in existing batch dimension.
             batch[key] = torch.cat(values)
+        elif key in ("detection", "detection_mask", "object_names"):
+            continue
         else:
             # state, state_mask, action and action_mask.
             # Stack to form the batch dimension.
+            print(f"Stacking {key}")
             batch[key] = torch.from_numpy(np.stack(values))
+        
     return batch
 
 

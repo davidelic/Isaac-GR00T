@@ -236,10 +236,10 @@ class FlowmatchingActionHead(nn.Module):
         print(f"Tune action head projector: {self.tune_projector}")
         print(f"Tune action head diffusion model: {self.tune_diffusion_model}")
         # Check if any parameters are still trainable. If not, print a warning.
-        if not tune_projector and not tune_diffusion_model:
-            for name, p in self.named_parameters():
-                if p.requires_grad:
-                    print(f"Action head trainable parameter: {name}")
+        # if not tune_projector and not tune_diffusion_model:
+        #     for name, p in self.named_parameters():
+        #         if p.requires_grad:
+        #             print(f"Action head trainable parameter: {name}")
         if not any(p.requires_grad for p in self.parameters()):
             print("Warning: No action head trainable parameters found.")
 
@@ -307,7 +307,9 @@ class FlowmatchingActionHead(nn.Module):
 
         # Get embodiment ID.
         embodiment_id = action_input.embodiment_id
-
+        print(f"[DEBUG] embodiment_id shape: {embodiment_id.shape}")
+        print(f"[DEBUG] embodiment_id: {embodiment_id}")
+        
         # Embed state.
         state_features = self.state_encoder(action_input.state, embodiment_id)
 
