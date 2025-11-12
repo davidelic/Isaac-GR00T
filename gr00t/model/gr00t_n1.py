@@ -179,7 +179,6 @@ class GR00T_N1_5(PreTrainedModel):
         backbone_loss = backbone_outputs.get("backbone_loss", None)
         action_head_loss = action_head_outputs.get("loss", None)
         token_metrics = backbone_outputs.get("token_metrics", None)
-        print(f"token_metrics: {token_metrics}")
         
         # Apply weights and combine
         total_loss = 0.0
