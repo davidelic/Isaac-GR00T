@@ -126,7 +126,14 @@ def calc_mse_for_single_trajectory(
                     elif inference_latency_steps <= j < action_horizon - intermediate_overlap_steps:
                         pred_action_across_time.append(concat_pred_action)
 
+                concat_gt_action = np.concatenate(
+                    [data_point[f"action.{key}"][j] for key in modality_keys], axis=0
+                )
+                gt_action_across_time.append(concat_gt_action)
+
     # plot the joints
+    state_joints_across_time = np.array(state_joints_across_time)[:steps]
+    gt_action_across_time = np.array(gt_action_across_time)[:steps]
     state_joints_across_time = np.array(state_joints_across_time)[:steps]
     gt_action_across_time = np.array(gt_action_across_time)[:steps]
     pred_action_across_time = np.array(pred_action_across_time)[:steps]
@@ -141,6 +148,10 @@ def calc_mse_for_single_trajectory(
     print("state_joints vs time", state_joints_across_time.shape)
     print("gt_action_joints vs time", gt_action_across_time.shape)
     print("pred_action_joints vs time", pred_action_across_time.shape)
+
+    # raise error when pred action has NaN
+    if np.isnan(pred_action_across_time).any():
+        raise ValueError("Pred action has NaN")
 
     # raise error when pred action has NaN
     if np.isnan(pred_action_across_time).any():

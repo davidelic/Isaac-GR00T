@@ -22,10 +22,7 @@ from torch.distributions import Beta
 from transformers import PretrainedConfig
 from transformers.feature_extraction_utils import BatchFeature
 
-from gr00t.model.action_head.action_encoder import (
-    SinusoidalPositionalEncoding,
-    swish,
-)
+from gr00t.model.action_head.action_encoder import SinusoidalPositionalEncoding, swish
 
 from .cross_attention_dit import DiT, SelfAttentionTransformer
 
@@ -152,7 +149,10 @@ class FlowmatchingActionHeadConfig(PretrainedConfig):
     use_vlln: bool = field(default=True)
 
     vl_self_attention_cfg: dict = field(default=None)
-    
+        num_target_vision_tokens: int = field(
+        default=32, metadata={"help": "Number of target vision tokens."}
+    )
+
     inference_rtc_overlap_steps: int = field(
         default=None, metadata={"help": "Real-time chunking full overlap steps for inference."}
     )
@@ -201,6 +201,8 @@ class FlowmatchingActionHead(nn.Module):
             hidden_dim=self.hidden_size,
             output_dim=self.action_dim,
         )
+        self.future_tokens = nn.Embedding(config.num_target_vision_tokens, self.input_embedding_dim)
+        nn.init.normal_(self.future_tokens.weight, mean=0.0, std=0.02)
 
         self.vlln = (
             nn.LayerNorm(config.backbone_embedding_dim) if config.use_vlln else nn.Identity()
@@ -242,9 +244,6 @@ class FlowmatchingActionHead(nn.Module):
         #             print(f"Action head trainable parameter: {name}")
         if not any(p.requires_grad for p in self.parameters()):
             print("Warning: No action head trainable parameters found.")
-
-        # if self.freeze_decode_layer:
-        #     self.decode_layer.requires_grad_(False)
 
     def set_frozen_modules_to_eval_mode(self):
         """
@@ -302,8 +301,8 @@ class FlowmatchingActionHead(nn.Module):
                 action_input[k] = expanded
 
         # Get vision and language embeddings.
-        vl_embeds = backbone_output.backbone_features
-        device = vl_embeds.device
+        vl_embs = backbone_output.backbone_features
+        device = vl_embs.device
 
         # Get embodiment ID.
         embodiment_id = action_input.embodiment_id
@@ -333,8 +332,9 @@ class FlowmatchingActionHead(nn.Module):
             action_features = action_features + pos_embs
 
         # Join vision, language, state and action embedding along sequence dimension.
-        sa_embs = torch.cat((state_features, action_features), dim=1)
-        vl_embs = vl_embeds
+        future_tokens = self.future_tokens.weight.unsqueeze(0).expand(vl_embs.shape[0], -1, -1)
+        sa_embs = torch.cat((state_features, future_tokens, action_features), dim=1)
+
         vl_attn_mask = backbone_output.backbone_attention_mask
 
         model_output = self.model(
@@ -362,18 +362,18 @@ class FlowmatchingActionHead(nn.Module):
         backbone_output = self.process_backbone_output(backbone_output)
 
         # Get vision and language embeddings.
-        vl_embeds = backbone_output.backbone_features
+        vl_embs = backbone_output.backbone_features
         embodiment_id = action_input.embodiment_id
 
         # Embed state.
         state_features = self.state_encoder(action_input.state, embodiment_id)
 
         # Set initial actions as the sampled noise.
-        batch_size = vl_embeds.shape[0]
-        device = vl_embeds.device
+        batch_size = vl_embs.shape[0]
+        device = vl_embs.device
         actions = torch.randn(
             size=(batch_size, self.config.action_horizon, self.config.action_dim),
-            dtype=vl_embeds.dtype,
+            dtype=vl_embs.dtype,
             device=device,
         )
         # Real-time chunking. NOTE(YL): simple implementation of RTC, can be improved with better guidance impl
@@ -429,10 +429,9 @@ class FlowmatchingActionHead(nn.Module):
                 pos_embs = self.position_embedding(pos_ids).unsqueeze(0)
                 action_features = action_features + pos_embs
 
-            vl_embs = vl_embeds
-
             # Join vision, language, state and action embedding along sequence dimension.
-            sa_embs = torch.cat((state_features, action_features), dim=1)
+            future_tokens = self.future_tokens.weight.unsqueeze(0).expand(vl_embs.shape[0], -1, -1)
+            sa_embs = torch.cat((state_features, future_tokens, action_features), dim=1)
 
             # Run model forward.
             model_output = self.model(
