@@ -99,15 +99,13 @@ def calculate_dataset_statistics(le_modality_meta, transforms, parquet_paths: li
 
     transformed_data = transform_statistics.apply(data= mapped_dict)
 
-    # Compute dataset statistics
-    dataset_statistics = {"state": {}, "action": {}}
+    dataset_statistics = {}
     for flat_key, array in transformed_data.items():
-        modality, subkey = flat_key.split(".", 1)
-        print(f"Computing statistics for {modality}...")
-        np_data = np.vstack(
-            [np.asarray(x, dtype=np.float32) for x in array]
-        )
-        dataset_statistics[modality][subkey] = {
+        print(f"Computing statistics for {flat_key}...")
+
+        np_data = np.asarray(array, dtype=np.float32)
+
+        dataset_statistics[flat_key] = {
             "mean": np.mean(np_data, axis=0).tolist(),
             "std": np.std(np_data, axis=0).tolist(),
             "min": np.min(np_data, axis=0).tolist(),
@@ -374,8 +372,16 @@ class LeRobotSingleDataset(Dataset):
             with open(stats_path, "w") as f:
                 json.dump(dataset_statistics, f, indent=4)
         # 3. Full dataset metadata
+
+        nested_statistics = {}
+        for flat_key, stats_values in dataset_statistics.items():
+            modality, subkey = flat_key.split(".", 1)
+            if modality not in nested_statistics:
+                nested_statistics[modality] = {}
+            nested_statistics[modality][subkey] = stats_values
+
         metadata = DatasetMetadata(
-            statistics=dataset_statistics,  # type: ignore
+            statistics=nested_statistics,  # type: ignore
             modalities=simplified_modality_meta,  # type: ignore
             embodiment_tag=embodiment_tag,
         )
@@ -522,6 +528,95 @@ class LeRobotSingleDataset(Dataset):
         """
         trajectory_id, base_index = self.all_steps[index]
         return self.transforms(self.get_step_data(trajectory_id, base_index))
+
+    
+    def get_entire_trajectory_data(self, trajectory_id: int) -> dict:
+        """
+        Get the RAW data for an entire trajectory. No transforms are applied.
+
+        This method fetches all steps of a trajectory, in contrast to `get_step_data`
+        which fetches a small window of steps.
+
+        Args:
+            trajectory_id (int): The ID of the trajectory.
+
+        Returns:
+            dict: The RAW data for the entire trajectory. The dictionary format is the
+                  same as `get_step_data`, but the arrays will have a sequence length
+                  equal to the full trajectory length.
+        """
+        data = {}
+        # Get the trajectory index to find its length
+        trajectory_index = self.get_trajectory_index(trajectory_id)
+        trajectory_length = self.trajectory_lengths[trajectory_index]
+
+        # Load the low-dimensional data for the trajectory
+        self.curr_traj_data = self.get_trajectory_data(trajectory_id)
+
+        # Iterate through all configured modalities and keys
+        for modality in self.modality_keys:
+            for key in self.modality_keys[modality]:
+                # --- Video ---
+                if modality == "video":
+                    subkey = key.replace("video.", "")
+                    video_path = self.get_video_path(trajectory_id, subkey)
+                    try:
+                        frames = get_all_frames(
+                            video_path.as_posix(),
+                            video_backend=self.video_backend,
+                            video_backend_kwargs=self.video_backend_kwargs,
+                        )
+                        # Pad or truncate if video frame count mismatch
+                        if frames.shape[0] != trajectory_length:
+                            print(
+                                f"Warning: Video {video_path} has {frames.shape[0]} frames, but trajectory length is {trajectory_length}. Padding/truncating."
+                            )
+                            if frames.shape[0] > trajectory_length:
+                                frames = frames[:trajectory_length]
+                            else:
+                                padding = np.zeros(
+                                    (trajectory_length - frames.shape[0], *frames.shape[1:]),
+                                    dtype=frames.dtype,
+                                )
+                                frames = np.concatenate([frames, padding], axis=0)
+                        data[key] = frames
+                    except (CorruptVideoError, FileNotFoundError) as e:
+                        print(f"Error loading full video {video_path}: {e}")
+                        print(f"Returning placeholder frames for trajectory {trajectory_id}, key {key}")
+                        try:
+                            video_meta = self.lerobot_modality_meta.video.get(subkey)
+                            height, width = video_meta.height, video_meta.width
+                        except Exception:
+                            height, width = 224, 224  # Fallback
+                        data[key] = np.zeros((trajectory_length, height, width, 3), dtype=np.uint8)
+
+                # --- State or Action ---
+                elif modality in ["state", "action"]:
+                    subkey = key.replace(modality + ".", "")
+                    le_cfg = getattr(self.lerobot_modality_meta, modality)
+                    le_key_meta = le_cfg[subkey]
+                    le_key = le_key_meta.original_key or subkey
+                    assert le_key in self.curr_traj_data.columns, f"No {le_key} found in {trajectory_id=}"
+
+                    data_array = np.stack(self.curr_traj_data[le_key].values)
+                    if data_array.ndim == 1:
+                        data_array = np.expand_dims(data_array, axis=1)
+
+                    le_indices = np.arange(le_key_meta.start, le_key_meta.end)
+                    data[key] = data_array[:, le_indices]
+
+                # --- Language ---
+                elif modality == "language":
+                    subkey = key.replace("annotation.", "")
+                    annotation_meta = self.lerobot_modality_meta.annotation
+                    assert annotation_meta and subkey in annotation_meta
+                    original_key = annotation_meta[subkey].original_key or subkey
+
+                    task_indices = self.curr_traj_data[original_key].tolist()
+                    data[key] = self.tasks.loc[task_indices]["task"].tolist()
+                else:
+                    raise ValueError(f"Invalid modality: {modality}")
+        return data
 
     def get_step_data(self, trajectory_id: int, base_index: int) -> dict:
         """Get the RAW data for a single step in a trajectory. No transforms are applied.
