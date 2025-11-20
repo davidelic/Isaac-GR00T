@@ -229,6 +229,7 @@ class Eagle2_5_VLForConditionalGeneration(Eagle2_5_VLPreTrainedModel, Generation
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
         num_tiles_list: Optional[List[torch.Tensor]] = None,
+        tokenizer_ranges: Optional[Dict[str, Tuple[int, int]]] = None,
     ) -> Union[Tuple, CausalLMOutputWithPast]:
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
 
@@ -268,22 +269,24 @@ class Eagle2_5_VLForConditionalGeneration(Eagle2_5_VLPreTrainedModel, Generation
             output_hidden_states=output_hidden_states,
         )
         logits = outputs.logits
-
+        # import pdb; pdb.set_trace()
         loss = None
         token_metrics = {}
         if labels is not None:
             # Shift so that tokens < n predict n
             shift_logits = logits[..., :-1, :].contiguous()
             shift_labels = labels[..., 1:].contiguous()
-            # Flatten the tokens
+            
+            # Compute token-level accuracy on shifted sequences
+            token_metrics = self.token_metrics(shift_logits, shift_labels, tokenizer_ranges=tokenizer_ranges)
+            
+            # Flatten the tokens for loss computation
             loss_fct = CrossEntropyLoss()
             shift_logits = shift_logits.view(-1, self.language_model.config.vocab_size)
             shift_labels = shift_labels.view(-1)
             # Enable model parallelism
             shift_labels = shift_labels.to(shift_logits.device)
             loss = loss_fct(shift_logits, shift_labels)
-            # Compute token-level accuracy
-            token_metrics = self.token_metrics(logits, labels)
 
         if not return_dict:
             output = (logits,) + outputs[1:]
@@ -317,54 +320,88 @@ class Eagle2_5_VLForConditionalGeneration(Eagle2_5_VLPreTrainedModel, Generation
         targets: torch.Tensor,         # [B, T]
         ignore_index: int = -100,
         topk: Tuple[int, ...] = (1, 8, 10),
+        tokenizer_ranges: Optional[Dict[str, Tuple[int, int]]] = None,
     ) -> Dict[str, torch.Tensor]:
         """
         Computes masked top-k accuracies and perplexity over valid (non-ignored) tokens.
 
+        Args:
+            tokenizer_ranges: Optional dict mapping tokenizer names to (start_id, end_id) tuples.
+                              If provided, computes metrics per tokenizer type.
+
         Returns:
-            {
-            'acc@1':  tensor(...),
-            'acc@8':  tensor(...),
-            'acc@10': tensor(...),
-            'ppl':    tensor(...),   # exp(mean NLL)
-            'nll':    tensor(...),   # mean negative log-likelihood
-            'count':  tensor(...),   # number of evaluated tokens
-            }
+            If tokenizer_ranges is None:
+                {
+                'acc@1':  tensor(...),
+                'acc@8':  tensor(...),
+                'acc@10': tensor(...),
+                'ppl':    tensor(...),   # exp(mean NLL)
+                'nll':    tensor(...),   # mean negative log-likelihood
+                'count':  tensor(...),   # number of evaluated tokens
+                }
+            If tokenizer_ranges is provided:
+                {
+                'overall': {'acc@1': ..., 'acc@8': ..., 'ppl': ..., 'count': ...},
+                'text': {'acc@1': ..., 'acc@8': ..., 'ppl': ..., 'count': ...},
+                'fast': {'acc@1': ..., 'acc@8': ..., 'ppl': ..., 'count': ...},
+                ...
+                }
         """
         device = logits.device
-        mask = (targets != ignore_index)                           # [B, T]
-        valid_count = mask.sum()
-
-        # If nothing to evaluate, return zeros / NaNs sensibly
-        if valid_count == 0:
-            out = {f"acc@{k}": torch.tensor(0.0, device=device) for k in set(topk)}
-            out.update({
-                "ppl": torch.tensor(float("nan"), device=device),
-                "nll": torch.tensor(float("nan"), device=device),
-                "count": torch.tensor(0, device=device),
-            })
-            return out
-
-        # --- Per-token NLL (masked) and perplexity ---
-        log_probs = torch.log_softmax(logits, dim=-1)              # [B, T, V]
-        tgt_clamped = torch.clamp(targets, min=0)                  # avoid -inf gather (ignored later by mask)
-        nll = -log_probs.gather(dim=-1, index=tgt_clamped.unsqueeze(-1)).squeeze(-1)  # [B, T]
-        nll = nll[mask]                                            # [N_valid]
-        mean_nll = nll.mean()
-        ppl = torch.exp(mean_nll)
-
-        # --- Top-k accuracies (masked) ---
-        Kmax = max(topk)
-        topk_idx = torch.topk(logits, k=Kmax, dim=-1).indices      # [B, T, Kmax]
-        # For each k, check if target is in top-k set
-        tgt_exp = targets.unsqueeze(-1)                            # [B, T, 1]
+        
+        # Helper function to compute metrics for a given mask
+        def _compute_metrics_for_mask(mask: torch.Tensor) -> Dict[str, torch.Tensor]:
+            """Compute metrics for tokens selected by the given mask."""
+            valid_count = mask.sum()
+            
+            # If nothing to evaluate, return zeros / NaNs
+            if valid_count == 0:
+                out = {f"acc@{k}": torch.tensor(0.0, device=device) for k in set(topk)}
+                out.update({
+                    "ppl": torch.tensor(float("nan"), device=device),
+                    "nll": torch.tensor(float("nan"), device=device),
+                    "count": torch.tensor(0, device=device),
+                })
+                return out
+            
+            # --- Per-token NLL (masked) and perplexity ---
+            log_probs = torch.log_softmax(logits, dim=-1)              # [B, T, V]
+            tgt_clamped = torch.clamp(targets, min=0)                  # avoid -inf gather
+            nll = -log_probs.gather(dim=-1, index=tgt_clamped.unsqueeze(-1)).squeeze(-1)  # [B, T]
+            nll = nll[mask]                                            # [N_valid]
+            mean_nll = nll.mean()
+            ppl = torch.exp(mean_nll)
+            
+            # --- Top-k accuracies (masked) ---
+            Kmax = max(topk)
+            topk_idx = torch.topk(logits, k=Kmax, dim=-1).indices      # [B, T, Kmax]
+            tgt_exp = targets.unsqueeze(-1)                            # [B, T, 1]
+            results = {}
+            for k in sorted(set(topk)):
+                hit_k = (topk_idx[..., :k] == tgt_exp).any(dim=-1)     # [B, T]
+                acc_k = (hit_k & mask).sum().float() / valid_count.float()
+                results[f"acc@{k}"] = acc_k
+            
+            results.update({"ppl": ppl, "nll": mean_nll, "count": valid_count})
+            return results
+        
+        # Overall mask (all non-ignored tokens)
+        overall_mask = (targets != ignore_index)                       # [B, T]
+        
+        
+        # If no tokenizer_ranges provided, return overall metrics only
+        if tokenizer_ranges is None:
+            return _compute_metrics_for_mask(overall_mask)
+        
+        # Compute per-tokenizer metrics
         results = {}
-        for k in sorted(set(topk)):
-            hit_k = (topk_idx[..., :k] == tgt_exp).any(dim=-1)     # [B, T]
-            acc_k = (hit_k & mask).sum().float() / valid_count.float()
-            results[f"acc@{k}"] = acc_k
-
-        results.update({"ppl": ppl, "nll": mean_nll, "count": valid_count})
+        results['overall'] = _compute_metrics_for_mask(overall_mask)
+        
+        for name, (start_id, end_id) in tokenizer_ranges.items():
+            # Create mask for this tokenizer type
+            type_mask = (targets >= start_id) & (targets < end_id) & overall_mask
+            results[name] = _compute_metrics_for_mask(type_mask)
+        
         return results
 
     

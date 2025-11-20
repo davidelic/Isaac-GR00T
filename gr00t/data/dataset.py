@@ -520,7 +520,7 @@ class LeRobotSingleDataset(Dataset):
 
         for modality_config in self.modality_configs.values():
             for key in modality_config.modality_keys:
-                if key == "lapa_action" or key == "dream_actions":
+                if key == "lapa_action" or key == "dream_actions" or "detection" in key:
                     continue  # no need for any metadata for lapa actions because it comes normalized
                 # Check if the key is valid
                 try:

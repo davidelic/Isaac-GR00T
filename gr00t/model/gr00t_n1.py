@@ -217,7 +217,7 @@ class GR00T_N1_5(PreTrainedModel):
         self.validate_data(action_head_outputs, backbone_outputs, is_training=False)
         return action_head_outputs
 
-    def get_action_tokens(self, inputs: dict) -> BatchFeature:
+    def get_predicted_tokens(self, inputs: dict) -> BatchFeature:
         backbone_inputs, action_inputs = self.prepare_input(inputs)
         action_tokens = self.backbone(backbone_inputs, autoregressive_inference=True)
         return action_tokens
