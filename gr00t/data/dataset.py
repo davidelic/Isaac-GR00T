@@ -28,10 +28,11 @@ import hashlib
 import json
 from collections import defaultdict
 from pathlib import Path
-from typing import Sequence
+from typing import Any, Sequence
 
 import numpy as np
 import pandas as pd
+import torch
 from pydantic import BaseModel, Field, ValidationError
 from torch.utils.data import Dataset
 from tqdm import tqdm
@@ -52,59 +53,88 @@ LE_ROBOT_MODALITY_FILENAME = "meta/modality.json"
 LE_ROBOT_EPISODE_FILENAME = "meta/episodes.jsonl"
 LE_ROBOT_TASKS_FILENAME = "meta/tasks.jsonl"
 LE_ROBOT_INFO_FILENAME = "meta/info.json"
-LE_ROBOT_STATS_FILENAME = "meta/stats.json"
+LE_ROBOT_STATS_FILENAME = "meta/relative_stats.json"
 LE_ROBOT_DATA_FILENAME = "data/*/*.parquet"
 
 
 
 
 
-def calculate_dataset_statistics(le_modality_meta, transforms, parquet_paths: list[Path]) -> dict:
-    """Calculate the dataset statistics of all columns for a list of parquet files."""
-    # Dataset statistics
-    all_low_dim_data_list = []
-    # Collect all the data
-    for parquet_path in tqdm(
-        sorted(list(parquet_paths)),
-        desc="Collecting all parquet files...",
-    ):
-        # Load the parquet file
-        parquet_data = pd.read_parquet(parquet_path)
-        parquet_data = parquet_data
-        all_low_dim_data_list.append(parquet_data)
-    all_low_dim_data = pd.concat(all_low_dim_data_list, axis=0)
-    
-    transform_statistics = ComposedModalityTransform(transforms=[t for t in transforms.transforms if t.change_stats])
-   
-    data_dict = all_low_dim_data.to_dict(orient="list")
-    mapped_dict = dict()
-    for modality in ("state", "action"):
-        le_state_action_meta = getattr(le_modality_meta, modality)
-        for subkey, meta in le_state_action_meta.items():
-            le_key = meta.original_key if meta.original_key is not None else subkey
-            if le_key not in data_dict:
-                continue
-            mapped_key = f"{modality}.{subkey}"
-            start, end = meta.start, meta.end
+def calculate_dataset_statistics(dataset: "LeRobotSingleDataset") -> dict:
+    """Calculate dataset statistics by running the chunked dataloader pipeline (without normalization)."""
+    # Build transform pipeline with the transforms that change the statistics (e.g., tensor casting, relative actions)
+    stats_transforms = []
+    if isinstance(dataset.transforms, ComposedModalityTransform):
+        stats_transforms = [t for t in dataset.transforms.transforms if getattr(t, "change_stats", False)]
 
-            col = data_dict[le_key]
-            sliced_col = []
-            for entry in col:
-                arr = np.asarray(entry, dtype=np.float32)
-                if arr.ndim == 0:
-                    arr = arr.reshape(1)
-                sliced = arr[start:end]
-                sliced_col.append(sliced)
-            mapped_dict[mapped_key] = np.array(sliced_col)
+    transform_statistics: ComposedModalityTransform | None = None
+    if len(stats_transforms) > 0:
+        transform_statistics = ComposedModalityTransform(transforms=stats_transforms, apply_to=[])
+        transform_statistics.eval()
 
-    transformed_data = transform_statistics.apply(data= mapped_dict)
+    # Gather all state/action keys we need to track
+    state_keys = dataset.modality_keys.get("state", [])
+    action_keys = dataset.modality_keys.get("action", [])
+    target_keys: list[str] = [*state_keys, *action_keys]
 
-    dataset_statistics = {}
-    for flat_key, array in transformed_data.items():
-        print(f"Computing statistics for {flat_key}...")
+    if len(target_keys) == 0:
+        return {}
 
-        np_data = np.asarray(array, dtype=np.float32)
+    # Buffer to accumulate per-key samples
+    data_buffer: dict[str, list[np.ndarray]] = {key: [] for key in target_keys}
 
+    total_steps = int(sum(dataset.trajectory_lengths))
+    progress = tqdm(
+        total=total_steps,
+        desc="Collecting chunked samples for statistics...",
+    )
+
+    for traj_idx, trajectory_id in enumerate(dataset.trajectory_ids):
+        trajectory_length = int(dataset.trajectory_lengths[traj_idx])
+        dataset.curr_traj_data = dataset.get_trajectory_data(trajectory_id)
+        dataset.curr_traj_id = trajectory_id
+
+        for base_index in range(trajectory_length):
+            sample: dict[str, Any] = {}
+
+            for key in state_keys:
+                sample[key] = dataset.get_state_or_action(
+                    trajectory_id=trajectory_id,
+                    modality="state",
+                    key=key,
+                    base_index=base_index,
+                )
+            for key in action_keys:
+                sample[key] = dataset.get_state_or_action(
+                    trajectory_id=trajectory_id,
+                    modality="action",
+                    key=key,
+                    base_index=base_index,
+                )
+            if transform_statistics is not None:
+                sample = transform_statistics.apply(sample)
+            for key in target_keys:
+                if key not in sample:
+                    continue
+                value = sample[key]
+                if isinstance(value, torch.Tensor):
+                    value_np = value.detach().cpu().numpy()
+                else:
+                    value_np = np.asarray(value)
+                data_buffer[key].append(value_np)
+
+            progress.update(1)
+
+    progress.close()
+
+    dataset_statistics: dict[str, dict[str, list[float]]] = {}
+    for flat_key, samples in data_buffer.items():
+        if len(samples) == 0:
+            continue
+
+        # Stack to shape (num_samples, chunk_dim, feature_dim, ...)
+        np_data = np.stack(samples).astype(np.float32)
+        print(f"Computing statistics for {flat_key} with shape {np_data.shape} ...")
         dataset_statistics[flat_key] = {
             "mean": np.mean(np_data, axis=0).tolist(),
             "std": np.std(np_data, axis=0).tolist(),
@@ -171,16 +201,8 @@ class LeRobotSingleDataset(Dataset):
             self.tag = embodiment_tag
 
         self._modality_keys = self._get_modality_keys()
-        self._metadata = self._get_metadata(EmbodimentTag(self.tag))
-        self._trajectory_ids, self._trajectory_lengths = self._get_trajectories()
-        self._all_steps = self._get_all_steps()
-        self._delta_indices = self._get_delta_indices()
-        self.set_transforms_metadata(self.metadata)
-        self.set_epoch(0)
 
-        print(f"Initialized dataset {self.dataset_name} with {embodiment_tag}")
-
-        # LeRobot-specific config
+        # Preload LeRobot metadata and dataset-specific resources required for stats computation
         self._lerobot_modality_meta = self._get_lerobot_modality_meta()
         self._lerobot_info_meta = self._get_lerobot_info_meta()
         self._data_path_pattern = self._get_data_path_pattern()
@@ -189,6 +211,18 @@ class LeRobotSingleDataset(Dataset):
         self._tasks = self._get_tasks()
         self.curr_traj_data = None
         self.curr_traj_id = None
+
+        # Trajectory indexing and delta windows
+        self._trajectory_ids, self._trajectory_lengths = self._get_trajectories()
+        self._all_steps = self._get_all_steps()
+        self._delta_indices = self._get_delta_indices()
+
+        # Dataset metadata (statistics + simplified modalities)
+        self._metadata = self._get_metadata(EmbodimentTag(self.tag))
+        self.set_transforms_metadata(self.metadata)
+        self.set_epoch(0)
+
+        print(f"Initialized dataset {self.dataset_name} with {embodiment_tag}")
 
         if use_pchands:
             print(f"Using PCHandsTransform for embodiment")
@@ -371,9 +405,7 @@ class LeRobotSingleDataset(Dataset):
         except (FileNotFoundError, ValidationError) as e:
             print(f"Failed to load dataset statistics: {e}")
             print(f"Calculating dataset statistics for {self.dataset_name}")
-            # Get all parquet files in the dataset paths
-            parquet_files = list((self.dataset_path).glob(LE_ROBOT_DATA_FILENAME))
-            dataset_statistics = calculate_dataset_statistics(le_modality_meta, self.transforms, parquet_files)
+            dataset_statistics = calculate_dataset_statistics(self)
             with open(stats_path, "w") as f:
                 json.dump(dataset_statistics, f, indent=4)
         # 3. Full dataset metadata
@@ -843,12 +875,12 @@ class LeRobotSingleDataset(Dataset):
         max_length = self.trajectory_lengths[trajectory_index]
         assert key.startswith(modality + "."), f"{key} must start with {modality + '.'}, got {key}"
         # Get the sub-key, e.g. state.joint_angles -> joint_angles
-        key = key.replace(modality + ".", "")
+        subkey = key.replace(modality + ".", "")
         # Get the lerobot key
         le_state_or_action_cfg = getattr(self.lerobot_modality_meta, modality)
-        le_key = le_state_or_action_cfg[key].original_key
+        le_key = le_state_or_action_cfg[subkey].original_key
         if le_key is None:
-            le_key = key
+            le_key = subkey
         # Get the data array, shape: (T, D)
         assert self.curr_traj_data is not None, f"No data found for {trajectory_id=}"
         assert le_key in self.curr_traj_data.columns, f"No {le_key} found in {trajectory_id=}"            
@@ -857,19 +889,17 @@ class LeRobotSingleDataset(Dataset):
             data_array = np.expand_dims(data_array, axis=1)
         assert data_array.ndim == 2, f"Expected 2D array, got {data_array.shape} array"
         le_indices = np.arange(
-            le_state_or_action_cfg[key].start,
-            le_state_or_action_cfg[key].end,
+            le_state_or_action_cfg[subkey].start,
+            le_state_or_action_cfg[subkey].end,
         )
         data_array = data_array[:, le_indices]
-        # Get the state or action configuration
-        state_or_action_cfg = getattr(self.metadata.modalities, modality)[key]
 
         # Pad the data
         return self.retrieve_data_and_pad(
             array=data_array,
             step_indices=step_indices,
             max_length=max_length,
-            padding_strategy="first_last" if state_or_action_cfg.absolute else "zero",
+            padding_strategy="first_last" if le_state_or_action_cfg[subkey].absolute else "zero",
         )
 
     def get_language(
