@@ -138,6 +138,7 @@ class LeRobotSingleDataset(Dataset):
         video_backend: str = "decord",
         video_backend_kwargs: dict | None = None,
         transforms: ComposedModalityTransform | None = None,
+        use_pchands: bool = False,
     ):
         """
         Initialize the dataset.
@@ -189,6 +190,10 @@ class LeRobotSingleDataset(Dataset):
         self.curr_traj_data = None
         self.curr_traj_id = None
 
+        if use_pchands:
+            print(f"Using PCHandsTransform for embodiment")
+            self.og_embodiment = self.tag
+            self.tag = 'pchands' # This is just the tag seen by the Trainer. The actual embodiment is handled in the transform.
         # Check if the dataset is valid
         self._check_integrity()
 
@@ -1139,7 +1144,6 @@ class LeRobotMixtureDataset(Dataset):
 
         # Set the epoch and sample the first epoch
         self.set_epoch(0)
-
         self.update_metadata(metadata_config)
 
     @property
@@ -1344,6 +1348,7 @@ class LeRobotMixtureDataset(Dataset):
         metadatas: list[DatasetMetadata],
         dataset_sampling_weights: list[float],
         percentile_mixing_method: str,
+        tag : str
     ) -> DatasetMetadata:
         """Merge multiple metadata into one."""
         # Convert to dicts
@@ -1351,11 +1356,13 @@ class LeRobotMixtureDataset(Dataset):
         # Create a new metadata dict
         merged_metadata = {}
 
-        # Check all metadata have the same embodiment tag
-        assert all(
-            metadata.embodiment_tag == metadatas[0].embodiment_tag for metadata in metadatas
-        ), "All metadata must have the same embodiment tag"
-        merged_metadata["embodiment_tag"] = metadatas[0].embodiment_tag
+        # Just Force it to be the same tag
+        
+        # assert all(
+        #     metadata.embodiment_tag == metadatas[0].embodiment_tag for metadata in metadatas
+        # ), "All metadata must have the same embodiment tag"
+
+        merged_metadata["embodiment_tag"] = tag
 
         # Merge the dataset statistics
         dataset_statistics = {}
@@ -1379,10 +1386,19 @@ class LeRobotMixtureDataset(Dataset):
         merged_metadata["modalities"] = {}
         for modality, configs in modality_configs.items():
             # Check that all modality configs correspond to the same tag matches
-            assert (
-                len(configs) == 1
-            ), f"Multiple modality configs for modality {modality}: {list(configs)}"
-            merged_metadata["modalities"][modality] = json.loads(configs.pop())
+            # assert (
+            #     len(configs) == 1
+            # ), f"Multiple modality configs for modality {modality}: {list(configs)}"
+            chosen = None
+            if len(configs) > 1:
+                print(
+                    f"Warning: Multiple modality configs for modality {modality}. Using one of them."
+                )
+                chosen = next(iter(configs)) # TODO Make this consistent
+            else:
+                chosen = configs.pop()
+
+            merged_metadata["modalities"][modality] = json.loads(chosen)
 
         return DatasetMetadata.model_validate(merged_metadata)
 
@@ -1409,6 +1425,7 @@ class LeRobotMixtureDataset(Dataset):
                 metadatas=metadatas,
                 dataset_sampling_weights=self.dataset_sampling_weights.tolist(),
                 percentile_mixing_method=metadata_config["percentile_mixing_method"],
+                tag=tag
             )
         for dataset in self.datasets:
             dataset.set_transforms_metadata(self.merged_metadata[dataset.tag])
