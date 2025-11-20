@@ -17,6 +17,7 @@ from enum import Enum
 
 
 class EmbodimentTag(Enum):
+    PCHANDS = "pchands"
     ORCA = "orca"
     MIMIC = "mimic"
     HUMAN = "human"
@@ -52,5 +53,6 @@ EMBODIMENT_TAG_MAPPING = {
     EmbodimentTag.ORCA.value: 17,
     EmbodimentTag.MIMIC.value: 16,
     EmbodimentTag.HUMAN.value: 15,
-    EmbodimentTag.FRANKA.value: 1
+    EmbodimentTag.FRANKA.value: 1,
+    EmbodimentTag.PCHANDS.value: 20
 }

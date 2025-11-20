@@ -161,6 +161,7 @@ class ConcatTransform(InvertibleModalityTransform):
         return data
 
     def unapply(self, data: dict) -> dict:
+        
         start_dim = 0
         assert "action" in data, f"{data.keys()=}"
         # For those dataset without actions (LAPA), we'll never run unapply
@@ -186,21 +187,58 @@ class ConcatTransform(InvertibleModalityTransform):
         return self.apply(data)
 
     def get_modality_metadata(self, key: str) -> StateActionMetadata:
-        modality, subkey = key.split(".")
+        """
+        Retrieve modality metadata from dataset statistics rather than from dataset.modalities.
+
+        Expected statistics layout (examples):
+        - flat keys: {"state.position": {"shape": [10], "rotation_type": None}, ...}
+        - nested: {"state": {"position": {"shape": [10], "rotation_type": None}}, ...}
+
+        Falls back to the old modalities attribute only if statistics is missing or key not found.
+        """
         assert self.dataset_metadata is not None, "Metadata not set"
-        modality_config = getattr(self.dataset_metadata.modalities, modality)
-        assert subkey in modality_config, f"{subkey=} not found in {modality_config=}"
-        assert isinstance(
-            modality_config[subkey], StateActionMetadata
-        ), f"Expected {StateActionMetadata} for {subkey=}, got {type(modality_config[subkey])=}"
-        return modality_config[subkey]
+
+        stats = getattr(self.dataset_metadata, "statistics", None)
+        info = None
+
+        # Try flat key in statistics first
+        if stats is not None and key in stats:
+            info = stats[key]
+        else:
+            # Try nested lookup: statistics[modality][subkey]
+            try:
+                modality, subkey = key.split(".")
+            except ValueError:
+                modality, subkey = key, None
+
+            if stats is not None and subkey is not None:
+                modality_stats = getattr(stats, modality, None)
+                if isinstance(modality_stats, dict) and subkey in modality_stats:
+                    info = modality_stats[subkey]
+
+        if info is None:
+            # Legacy behavior: use dataset_metadata.modalities
+            modality, subkey = key.split(".")
+            modality_config = getattr(self.dataset_metadata.modalities, modality)
+            assert subkey in modality_config, f"{subkey=} not found in {modality_config=}"
+            assert isinstance(
+                modality_config[subkey], StateActionMetadata
+            ), f"Expected {StateActionMetadata} for {subkey=}, got {type(modality_config[subkey])=}"
+            return modality_config[subkey]
+
+        shape = info.max.shape
+        # TODO: DONT HARDCODE absolute and continuous...
+        return StateActionMetadata(shape=shape, rotation_type=None, absolute=False, continuous=True)
 
     def get_state_action_dims(self, key: str) -> int:
         """Get the dimension of a state or action key from the dataset metadata."""
         modality_config = self.get_modality_metadata(key)
         shape = modality_config.shape
-        assert len(shape) == 1, f"{shape=}"
-        return shape[0]
+        #TODO(davide): remove this and not hardcode the shape
+        # assert len(shape) == 1, f"{shape=}" # original code commented out
+        # return shape[0] # original code commented out
+        # shape is something like (CHUNK_DIM, FEATURE_DIM) so we return the last dimension
+        return shape[-1]
 
     def is_rotation_key(self, key: str) -> bool:
         modality_config = self.get_modality_metadata(key)
