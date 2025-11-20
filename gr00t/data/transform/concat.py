@@ -234,9 +234,10 @@ class ConcatTransform(InvertibleModalityTransform):
         """Get the dimension of a state or action key from the dataset metadata."""
         modality_config = self.get_modality_metadata(key)
         shape = modality_config.shape
-        print(f"{key=}, {shape=}, {modality_config=}")
-        # import pdb; pdb.set_trace()
-        # assert len(shape) == 1, f"{shape=}"
+        #TODO(davide): remove this and not hardcode the shape
+        # assert len(shape) == 1, f"{shape=}" # original code commented out
+        # return shape[0] # original code commented out
+        # shape is something like (CHUNK_DIM, FEATURE_DIM) so we return the last dimension
         return shape[-1]
 
     def is_rotation_key(self, key: str) -> bool:
