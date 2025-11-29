@@ -307,8 +307,6 @@ class FlowmatchingActionHead(nn.Module):
 
         # Get embodiment ID.
         embodiment_id = action_input.embodiment_id
-        print(f"[DEBUG] embodiment_id shape: {embodiment_id.shape}")
-        print(f"[DEBUG] embodiment_id: {embodiment_id}")
         
         # Embed state.
         state_features = self.state_encoder(action_input.state, embodiment_id)
