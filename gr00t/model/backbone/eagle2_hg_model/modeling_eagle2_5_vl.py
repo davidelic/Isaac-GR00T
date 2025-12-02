@@ -230,6 +230,7 @@ class Eagle2_5_VLForConditionalGeneration(Eagle2_5_VLPreTrainedModel, Generation
         return_dict: Optional[bool] = None,
         num_tiles_list: Optional[List[torch.Tensor]] = None,
         tokenizer_ranges: Optional[Dict[str, Tuple[int, int]]] = None,
+        tokenizer_separators: Optional[Dict[str, Tuple[int, int]]] = None,
     ) -> Union[Tuple, CausalLMOutputWithPast]:
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
 
@@ -278,7 +279,7 @@ class Eagle2_5_VLForConditionalGeneration(Eagle2_5_VLPreTrainedModel, Generation
             shift_labels = labels[..., 1:].contiguous()
             
             # Compute token-level accuracy on shifted sequences
-            token_metrics = self.token_metrics(shift_logits, shift_labels, tokenizer_ranges=tokenizer_ranges)
+            token_metrics = self.token_metrics(shift_logits, shift_labels, tokenizer_ranges=tokenizer_ranges, tokenizer_separators=tokenizer_separators)
             
             # Flatten the tokens for loss computation
             loss_fct = CrossEntropyLoss()
@@ -321,6 +322,8 @@ class Eagle2_5_VLForConditionalGeneration(Eagle2_5_VLPreTrainedModel, Generation
         ignore_index: int = -100,
         topk: Tuple[int, ...] = (1, 8, 10),
         tokenizer_ranges: Optional[Dict[str, Tuple[int, int]]] = None,
+        tokenizer_separators: Optional[Dict[str, Tuple[int, int]]] = None,
+        use_separators: bool = True,
     ) -> Dict[str, torch.Tensor]:
         """
         Computes masked top-k accuracies and perplexity over valid (non-ignored) tokens.
@@ -387,21 +390,47 @@ class Eagle2_5_VLForConditionalGeneration(Eagle2_5_VLPreTrainedModel, Generation
         
         # Overall mask (all non-ignored tokens)
         overall_mask = (targets != ignore_index)                       # [B, T]
-        
-        
-        # If no tokenizer_ranges provided, return overall metrics only
-        if tokenizer_ranges is None:
-            return _compute_metrics_for_mask(overall_mask)
-        
-        # Compute per-tokenizer metrics
-        results = {}
-        results['overall'] = _compute_metrics_for_mask(overall_mask)
-        
-        for name, (start_id, end_id) in tokenizer_ranges.items():
-            # Create mask for this tokenizer type
-            type_mask = (targets >= start_id) & (targets < end_id) & overall_mask
-            results[name] = _compute_metrics_for_mask(type_mask)
-        
+                
+        if use_separators:
+            if tokenizer_separators is None:
+                return _compute_metrics_for_mask(overall_mask)
+            
+            # Compute per-tokenizer separators metrics
+            results = {}
+            results['overall'] = _compute_metrics_for_mask(overall_mask)
+            
+            for name, (start_separator_id, end_separator_id) in tokenizer_separators.items():
+                # Create mask between separator ids for each sample in the batch
+                type_mask = torch.zeros_like(targets, dtype=torch.bool)
+                for batch_idx in range(targets.shape[0]):
+                    row = targets[batch_idx]
+                    start_idx = (row == start_separator_id).nonzero(as_tuple=True)
+                    end_idx = (row == end_separator_id).nonzero(as_tuple=True)
+                    
+                    if len(start_idx[0]) != 1 or len(end_idx[0]) != 1:
+                        # Skip this sample if separators are missing or duplicated
+                        continue
+                    
+                    i1 = start_idx[0].item()
+                    i2 = end_idx[0].item()
+                    if i2 < i1:
+                        continue
+                    type_mask[batch_idx, i1:i2 + 1] = True
+                
+                results[name] = _compute_metrics_for_mask(type_mask)
+        else:
+            if tokenizer_ranges is None:
+                return _compute_metrics_for_mask(overall_mask)
+            
+            # Compute per-tokenizer metrics
+            results = {}
+            results['overall'] = _compute_metrics_for_mask(overall_mask)
+            
+            for name, (start_id, end_id) in tokenizer_ranges.items():
+                # Create mask for this tokenizer type
+                type_mask = (targets >= start_id) & (targets < end_id) & overall_mask
+                results[name] = _compute_metrics_for_mask(type_mask)
+
         return results
 
     
